@@ -1,0 +1,26 @@
+# harness.yaml.example — canonical reference configuration.
+#
+# This file is the SOURCE OF TRUTH for what a valid harness.yaml looks like.
+# If a new feature can't be expressed here, reconsider whether it belongs in
+# the harness at all (see CLAUDE.md §7).
+#
+# CONTENTS
+#   - One section per pluggable concern: scanners, policy, audit_sinks,
+#     tool_registry, secrets.
+#   - Each adapter is referenced by NAME (the entry-point name), not by
+#     import path. The discovery layer (adapters/discovery.py) resolves
+#     names to classes at startup.
+#   - Boundary-level toggles: scan_input.enabled, scan_output.enabled.
+#     check_tool_call has no toggle — it is mandatory.
+#
+# WHAT THE CODING AGENT SHOULD DO HERE
+#   Fill in concrete YAML demonstrating every reference adapter. Use
+#   ${ENV_VAR} interpolation in at least one place to show config/resolution
+#   is wired. Use a secret reference (secret://name) in at least one place
+#   to show SecretsProvider is wired.
+#
+# DO NOT
+#   - Reference enterprise adapter names (purview, opa, splunk) here. The
+#     example must work with only `pip install harness`.
+#   - Add settings that have no consumer in the codebase. Every key must
+#     map to a field in config/schema.py.
