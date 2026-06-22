@@ -1,129 +1,94 @@
-# Concurrency model
+# Concurrency
 
-The authoritative reference for concurrent agent and subagent execution.
-Read before implementing ToolRegistry, AuditSink, load_sources,
-or any code touching shared state during a boundary call.
+SHAI is designed for concurrent async use within a single process. One `Harness` instance serves many concurrent agent turns safely.
 
 ---
 
-## 1. The core guarantee
+## View isolation
 
-One `Harness` instance safely serves any number of concurrent agents
-and subagents. All facade methods are `async def` — the harness is
-designed for asyncio-based concurrent execution.
-
-Shared state (adapters, base ToolRegistry) is read-only after startup.
-Per-turn state (ScopedRegistryView) is per-agent-identity, never shared.
-
----
-
-## 2. Agent identity and isolation
-
-The effective identity for all internal harness operations is:
+Each call to `harness.load_sources(ctx)` creates a fresh `InMemoryRegistryView` keyed by `id(ctx)`. This is Python's object identity — two distinct `RuntimeContext` objects always have distinct keys even if they represent the same logical agent.
 
 ```python
-(agent_id, sub_agent_id or "")  # ctx.agent_key()
+# Two concurrent turns for the same agent — isolated by object identity
+ctx_a = RuntimeContext(agent_id="orchestrator_agent")
+ctx_b = RuntimeContext(agent_id="orchestrator_agent")
+
+assert id(ctx_a) != id(ctx_b)   # distinct keys → distinct views
+
+await asyncio.gather(
+    harness.load_sources(ctx_a),
+    harness.load_sources(ctx_b),
+)
+# _views[id(ctx_a)] and _views[id(ctx_b)] are two separate objects
 ```
 
-`user_id` and `session_id` on RuntimeContext are audit-only fields.
-The harness never uses them for keying, policy evaluation, source
-activation, or view management. Code that does is a bug.
+**Why `id(ctx)` and not `agent_key()`?**
 
-Each concurrent agent/subagent pair has:
-- Own RuntimeContext
-- Own ScopedRegistryView (WeakValueDictionary keyed on agent_key())
-- Own audit trail (agent_id + sub_agent_id in every AuditEvent)
-- Own agent profile (AgentConfig or SubAgentConfig)
-- Own source set (load_sources activates only declared sources)
+`agent_key()` returns `(agent_id, sub_agent_id or "")`. Ten concurrent turns for the same agent would all share one key — last writer wins, earlier turns lose their view. `id(ctx)` gives per-object uniqueness at zero cost.
+
+**Lifetime:** the view lives from `load_sources(ctx)` to `unload_sources(ctx)`. The caller must hold a strong reference to `ctx` for the duration of the turn — if `ctx` is garbage-collected and a new `RuntimeContext` happens to reuse the same `id()`, `check_tool_call` will not find the view and will fall back to a fresh base-registry view.
 
 ---
 
-## 3. ScopedRegistryView — the critical invariant
+## Shared base registry
 
-`load_sources` creates a per-call view and stores it in:
+`InMemoryRegistry` is the shared base. Writes (`register`, `register_many`) hold a `threading.Lock`. Reads (`get`, `list`) are lock-free — GIL-safe in CPython.
+
+**Startup invariant:** `register_tools()` must be called before any `load_sources()` call. Registering tools during a live turn is not supported and may produce inconsistent view snapshots.
+
+---
+
+## Audit emission
+
+`AuditEmitter.emit()` fans out to all sinks concurrently via `asyncio.gather`. Individual sink failures are logged and swallowed. All sinks failing raises `AuditEmissionError`.
+
+`StdoutSink` writes synchronously — stdout writes are fast enough that blocking the event loop briefly is acceptable. `FileSink` uses `asyncio.Lock` + `run_in_executor` for ordered, non-blocking file I/O.
+
+---
+
+## Thread safety
+
+The harness is async-first. All boundary methods are `async def`. The `threading.Lock` in `InMemoryRegistry` exists to protect startup writes from threads (e.g. a background reload thread). The async boundaries themselves never hold the lock — they read without locking.
+
+`scope_context_for_subagent` is the only synchronous method on the facade. It reads from the registry (lock-free) and constructs a new frozen `RuntimeContext`. It is safe to call from any thread.
+
+---
+
+## Parent + subagent concurrent
 
 ```python
-self._views: WeakValueDictionary[tuple[str,str], ScopedRegistryView]
-# key = (agent_id, sub_agent_id or "")
+parent_ctx = RuntimeContext(agent_id="orchestrator_agent")
+child_ctx  = harness.scope_context_for_subagent(parent_ctx, "research_sub")
+
+# Load both views concurrently
+await asyncio.gather(
+    harness.load_sources(parent_ctx),
+    harness.load_sources(child_ctx),
+)
+
+# Run gates concurrently — each uses its own view
+await asyncio.gather(
+    harness.check_tool_call("search_docs", {}, parent_ctx),
+    harness.check_tool_call("search_docs", {}, child_ctx),
+)
+
+# Unload
+await asyncio.gather(
+    harness.unload_sources(parent_ctx),
+    harness.unload_sources(child_ctx),
+)
 ```
 
-`check_tool_call` retrieves it by the same key. `unload_sources` drops it.
-`WeakValueDictionary` provides a GC safety net if unload is not called.
-Explicit `unload_sources` is still required.
-
-The view writes only to an in-call overlay. The shared ToolRegistry base
-(startup tools) is never written during a turn. Cross-agent tool leakage
-is structurally impossible.
-
-Parent and subagent have separate views:
-```
-("orchestrator", "")            → view with outlook_mcp + docs tools
-("orchestrator", "research_sub") → view with docs tools only
-```
+The parent and child views are distinct objects at distinct `id()` keys. Tool additions to the child's overlay never appear in the parent's view.
 
 ---
 
-## 4. Async model
+## Hazards to avoid
 
-All Protocol methods and facade methods are `async def`. This is a
-one-pass architectural decision — no sync variants exist.
+**Don't reuse a RuntimeContext across turns.** Create a fresh one per turn. The `id(ctx)` key is per-object, not per-turn-semantics.
 
-Runtime: `asyncio`. No `trio`, no `anyio`.
+**Don't call `load_sources` twice with the same ctx without calling `unload_sources` in between.** The second call overwrites the view in `_views` — the first view is lost.
 
-Reference adapters with no I/O (regex scanners, rules evaluator, env
-secrets) implement `async def` methods that return immediately. The
-async overhead is negligible; the consistency is mandatory.
+**Don't register tools after startup.** `register_tools()` acquires a threading.Lock. Calling it mid-turn may block coroutines briefly and will not update views that are already open.
 
-Scanners run concurrently per boundary call via `asyncio.gather`.
-AuditSink.emit() calls run concurrently via `asyncio.gather`.
-ToolSource.load() calls run concurrently via `asyncio.gather`.
-
----
-
-## 5. AuditSink async safety
-
-All sink implementations must be safe for concurrent async calls.
-This is stated in the Protocol and enforced by the concurrent-emit test
-in `tests/contracts/sink_contract.py`.
-
-- `StdoutSink` — stdout writes are fast; acceptable to call without
-  locking. Interleaving possible at OS level. Dev/container use only.
-- `FileSink` — uses `asyncio.Lock` around write + `run_in_executor`.
-  Serialises writes; offloads blocking I/O to thread pool.
-- Enterprise sinks — HTTP-based; inherently concurrent. Internal
-  batching queues use `asyncio.Queue`.
-
----
-
-## 6. AgentRegistry concurrency
-
-`AgentRegistry.get()` is synchronous (required for `scope_context_for_subagent`
-to remain sync). GIL-safe dict read in CPython.
-
-Load/reload/deregister use `threading.Lock` for writes. Mixed
-sync/async write operations use `asyncio.to_thread` when called from
-async context.
-
----
-
-## 7. What does NOT require coordination
-
-- `scan_input` / `scan_output` — stateless, each call independent.
-- `check_tool_call` — reads from view (per-agent) and base (read-only).
-- `scope_context_for_subagent` — pure sync function, no shared writes.
-- `PolicyEngine.evaluate` / `evaluate_source` — rules read-only.
-- `SecretsProvider.resolve` — called only at startup, before async loop.
-
----
-
-## 8. Test coverage
-
-Unit tests: one file per module, test async boundaries with pytest-asyncio.
-
-Integration tests:
-- `test_end_to_end_turn.py` — full async turn, subagent turn, isolation.
-- `test_concurrent_agents.py` — 10 concurrent agents, parent+subagent
-  concurrent, overlapping load/unload.
-
-Contract tests: all async. `sink_contract.py` includes concurrent-emit
-test via `asyncio.gather`.
+**Don't hold ctx beyond the turn.** If `ctx` is held in a long-lived data structure, its `id()` may appear in `_views` indefinitely — the view is never GC'd and tools from old source activations remain visible.

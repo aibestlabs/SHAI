@@ -20,11 +20,14 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/harness"]
+packages = ["src/harness", "src/harness_cli"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[project.scripts]
+harness = "harness_cli.main:main"
 
 [project.entry-points."harness.scanners"]
 regex_pii       = "harness.adapters.scanners.regex_pii:RegexPIIScanner"
