@@ -117,6 +117,10 @@ class SHAI:
         # Per-agent resolved tool sets — populated at load_agent() time
         # key: agent_id, value: {tool_name: Tool} for that agent
         self._agent_tools: dict[str, dict[str, Tool]] = {}
+        # Per-agent source-enriched tool overrides — keyed by agent_id then tool name.
+        # When a source merges tags onto a tool, the enriched Tool is stored here
+        # and takes precedence over the registry entry in _resolve_tools.
+        self._source_overrides: dict[str, dict[str, Tool]] = {}
 
     # ── Construction ──────────────────────────────────────────────────────
 
@@ -291,14 +295,23 @@ class SHAI:
 
         # Activate declared sources for this agent
         source_tools = await self._source_registry.activate(ctx, list(cfg.sources))
-        # Register source-discovered tools into the shared registry so they
-        # are visible to check_tool_call and policy rules
+
+        # Source tools may carry additional tags merged from the source config.
+        # We cannot blindly re-register them — the registry rejects same-name
+        # tools with different tags (correct: it protects canonical definitions).
+        # Instead, store source-enriched variants as per-agent overrides.
+        # _resolve_tools() prefers these over the registry entry, so the gate
+        # evaluates policy against the fully-enriched tag set.
+        overrides: dict[str, Tool] = {}
         for tool in source_tools:
             try:
                 await self._tool_registry.register(tool)
-            except Exception as e:
-                log.warning("source tool registration failed — skipped",
-                            extra={"tool": tool.name, "error": str(e)})
+                # Registered cleanly (new tool from MCP or first registration)
+            except Exception:
+                # Tag mismatch with an existing registry entry — store as override
+                # so this agent sees the enriched version without polluting others.
+                overrides[tool.name] = tool
+        self._source_overrides[cfg.id] = overrides
 
         self._agent_tools[cfg.id] = self._resolve_tools(cfg)
         log.info("agent loaded",
@@ -312,11 +325,13 @@ class SHAI:
         cfg = await self._agent_registry.reload(path)
         ctx = AgentContext(agent_id=cfg.id)
         source_tools = await self._source_registry.activate(ctx, list(cfg.sources))
+        overrides: dict[str, Tool] = {}
         for tool in source_tools:
             try:
                 await self._tool_registry.register(tool)
             except Exception:
-                pass
+                overrides[tool.name] = tool
+        self._source_overrides[cfg.id] = overrides
         self._agent_tools[cfg.id] = self._resolve_tools(cfg)
         log.info("agent reloaded",
                  extra={"agent_id": cfg.id,
@@ -328,6 +343,7 @@ class SHAI:
         config = self._agent_registry.get(agent_id)
         await self._agent_registry.deregister(config)
         self._agent_tools.pop(agent_id, None)
+        self._source_overrides.pop(agent_id, None)
         if self._rate_limiter is not None:
             self._rate_limiter.reset(agent_id)
 
@@ -490,16 +506,22 @@ class SHAI:
     def _resolve_tools(self, cfg: AgentConfig) -> dict[str, Tool]:
         """Build the {name: Tool} dict for an agent at startup.
 
-        Includes every registered tool whose name is in allowed_tool_names.
-        Tag-based capability filtering happens at gate time (check_tool_call L2)
-        via ctx.allowed_tags — not here. Tools may carry tags like 'sensitive'
-        that are scanner hints, not capability gates, so excluding by tag at
-        resolution time would incorrectly drop valid tools.
+        Source-enriched overrides (tags merged from SourceConfig) take
+        precedence over the registry entry so the gate evaluates policy
+        against the fully-enriched tag set. This ensures that source_tags
+        in policy rules match correctly even when a tool was pre-registered
+        with fewer tags.
         """
         all_tools   = self._tool_registry.as_dict()
+        overrides   = self._source_overrides.get(cfg.id, {})
         agent_names = set(cfg.allowed_tool_names)
-        return {name: tool for name, tool in all_tools.items()
-                if name in agent_names}
+        resolved = {name: tool for name, tool in all_tools.items()
+                    if name in agent_names}
+        # Apply enriched overrides — replaces registry entry for this agent only
+        for name, tool in overrides.items():
+            if name in agent_names:
+                resolved[name] = tool
+        return resolved
 
     def _audit_tags_for(self, ctx: AgentContext) -> dict[str, str]:
         try:

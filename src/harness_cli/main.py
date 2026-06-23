@@ -1,14 +1,14 @@
-"""harness-cli — developer tools for SHAI.
+"""shai — developer tools for SHAI.
 
 Commands:
-  harness validate           Validate harness.yaml and all agent files.
-  harness agents list        List all registered agents.
-  harness audit tail         Tail an audit JSONL log file.
+  shai validate           Validate harness.yaml and all agent files.
+  shai agents list        List all registered agents.
+  shai audit tail         Tail an audit JSONL log file.
 
 Usage:
-  harness validate [--config PATH]
-  harness agents list [--config PATH]
-  harness audit tail [--file PATH] [--follow]
+  shai validate [--config PATH]
+  shai agents list [--config PATH]
+  shai audit tail [--file PATH] [--follow]
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from harness_cli.commands.audit import cmd_audit_tail
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="harness",
+        prog="shai",
         description="SHAI developer tools",
     )
     p.add_argument(
@@ -79,13 +79,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "agents":
         if args.agents_command == "list":
             return cmd_agents_list(args)
-        print("harness agents: specify a subcommand (list)", file=sys.stderr)
+        print("shai agents: specify a subcommand (list)", file=sys.stderr)
         return 1
 
     if args.command == "audit":
         if args.audit_command == "tail":
             return cmd_audit_tail(args)
-        print("harness audit: specify a subcommand (tail)", file=sys.stderr)
+        print("shai audit: specify a subcommand (tail)", file=sys.stderr)
         return 1
 
     parser.print_help()

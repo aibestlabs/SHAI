@@ -358,3 +358,113 @@ async def test_shai_source_tools_available_at_load_agent(tmp_path: Path):
     tools = harness._agent_tools.get("test_agent", {})
     assert "search_docs" in tools
     await harness.close()
+
+
+# ── Source tag override — the critical correctness test ───────────────────
+
+async def test_source_tags_visible_in_agent_tool_set(tmp_path):
+    """Source-merged tags must be present in the agent's resolved tool set.
+
+    Regression test for: source-level tool tags silently dropped when a tool
+    is pre-registered and the source-enriched variant conflicts with it.
+
+    Sequence:
+      1. Tool registered with tags=[read]
+      2. Source configured with tags=[sensitive]
+      3. Source.load() returns tool with tags=[read, sensitive]
+      4. ToolRegistry rejects re-registration (different tags)
+      5. _resolve_tools() must return tool with [read, sensitive] — not [read]
+    """
+    from pathlib import Path as _Path
+    from harness.core.harness import SHAI
+    from harness.core.types import Transport
+
+    cfg_file = tmp_path / "h.yaml"
+    cfg_file.write_text(
+        "version: 1\n"
+        "scan_input:\n  enabled: false\n"
+        "scan_output:\n  enabled: false\n"
+        "policy:\n  rules: []\n"
+        "sources:\n"
+        "  - name: tagged_local\n"
+        "    transport: local\n"
+        "    tags:\n      - sensitive\n"   # source adds 'sensitive' tag
+    )
+
+    agent_file = tmp_path / "agent.yaml"
+    agent_file.write_text(
+        "id: test_agent\n"
+        "allowed_tool_names:\n  - search_docs\n"
+        "allowed_tags:\n  - read\n  - sensitive\n"
+        "sources:\n  - tagged_local\n"
+    )
+
+    harness = await SHAI.from_yaml(cfg_file)
+
+    # Register tool with only the base tags — no 'sensitive'
+    await harness.register_tools([
+        Tool(name="search_docs", tags=["read"], transport=Transport.LOCAL)
+    ])
+
+    ctx = await harness.load_agent(agent_file)
+
+    # The agent's resolved tool set must have the source-enriched tags
+    resolved = harness._agent_tools["test_agent"]
+    assert "search_docs" in resolved, "search_docs not in agent tool set"
+
+    tool_tags = set(resolved["search_docs"].tags)
+    assert "read"      in tool_tags, "base tag 'read' missing"
+    assert "sensitive" in tool_tags, \
+        f"source tag 'sensitive' silently dropped — gate sees {tool_tags}"
+
+    await harness.close()
+
+
+async def test_other_agents_not_affected_by_source_override(tmp_path):
+    """Source tag overrides are per-agent — other agents see the original tags."""
+    from harness.core.harness import SHAI
+    from harness.core.types import Transport
+
+    cfg_file = tmp_path / "h.yaml"
+    cfg_file.write_text(
+        "version: 1\n"
+        "scan_input:\n  enabled: false\n"
+        "scan_output:\n  enabled: false\n"
+        "policy:\n  rules: []\n"
+        "sources:\n"
+        "  - name: tagged_local\n"
+        "    transport: local\n"
+        "    tags:\n      - sensitive\n"
+    )
+
+    agent_a = tmp_path / "agent_a.yaml"
+    agent_a.write_text(
+        "id: agent_a\n"
+        "allowed_tool_names:\n  - search_docs\n"
+        "allowed_tags:\n  - read\n  - sensitive\n"
+        "sources:\n  - tagged_local\n"   # uses tagged source
+    )
+
+    agent_b = tmp_path / "agent_b.yaml"
+    agent_b.write_text(
+        "id: agent_b\n"
+        "allowed_tool_names:\n  - search_docs\n"
+        "allowed_tags:\n  - read\n"
+        # no sources — sees only the base-registered tool
+    )
+
+    harness = await SHAI.from_yaml(cfg_file)
+    await harness.register_tools([
+        Tool(name="search_docs", tags=["read"], transport=Transport.LOCAL)
+    ])
+
+    await harness.load_agent(agent_a)
+    await harness.load_agent(agent_b)
+
+    tags_a = set(harness._agent_tools["agent_a"]["search_docs"].tags)
+    tags_b = set(harness._agent_tools["agent_b"]["search_docs"].tags)
+
+    assert "sensitive" in tags_a, "agent_a should see source-enriched tags"
+    assert "sensitive" not in tags_b, "agent_b must not be affected by agent_a's source override"
+
+    await harness.close()
