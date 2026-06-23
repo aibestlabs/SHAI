@@ -112,7 +112,7 @@ async def test_harness_scan_tool_result_disabled(tmp_path: Path):
         "audit_sinks:\n  - name: stdout\n"
         # scan_tool_result not present → defaults to disabled
     )
-    h = SHAI.from_yaml(cfg)
+    h = await SHAI.from_yaml(cfg)
     await h.load_agent(FIXTURES / "agents" / "orchestrator_agent.yaml")
     await h.register_tools([
         Tool(name="search_docs", tags=["read", "internal"], transport=Transport.LOCAL),
@@ -137,7 +137,7 @@ async def test_harness_scan_tool_result_enabled(tmp_path: Path):
         "policy:\n  name: rules\n"
         "audit_sinks:\n  - name: stdout\n"
     )
-    h = SHAI.from_yaml(cfg)
+    h = await SHAI.from_yaml(cfg)
     await h.load_agent(FIXTURES / "agents" / "orchestrator_agent.yaml")
     await h.register_tools([
         Tool(name="search_docs", tags=["read", "internal"], transport=Transport.LOCAL),

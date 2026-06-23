@@ -65,3 +65,25 @@ audit_sinks:
 audit_signing:
   enabled: false
   secret: "secret://AUDIT_SIGNING_KEY"
+
+# ── Tool sources ──────────────────────────────────────────────────────────
+# Sources declare where tools come from. MCP sources connect to external
+# servers; local sources expose already-registered tools to agents by name.
+# Credentials are resolved via SecretsProvider (secret:// URIs).
+#
+# sources:
+#   - name: slack_mcp
+#     transport: mcp
+#     url: "https://mcp.slack.com/sse"
+#     credentials:
+#       token: "secret://SLACK_MCP_TOKEN"
+#     tags:
+#       - external_mcp
+#       - messaging
+#
+#   - name: docs_skill
+#     transport: local
+#     tags:
+#       - read
+#       - internal
+

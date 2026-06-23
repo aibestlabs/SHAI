@@ -18,6 +18,9 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
+mcp = [
+    "httpx>=0.27",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/harness", "src/harness_cli"]
@@ -39,6 +42,11 @@ rules = "harness.policy.rules:RuleBasedPolicy"
 [project.entry-points."harness.audit_sinks"]
 stdout = "harness.adapters.audit_sinks.stdout:StdoutSink"
 file   = "harness.adapters.audit_sinks.file:FileSink"
+
+[project.entry-points."harness.sources"]
+local = "harness.tools.source:LocalSource"
+skill = "harness.tools.source:SkillSource"
+mcp   = "harness.tools.source:MCPSource"
 
 [project.entry-points."harness.secrets"]
 env = "harness.adapters.secrets.env:EnvVarProvider"

@@ -1,6 +1,6 @@
-"""Harness facade — the only public entry point of the SDK.
+"""SHAI facade — the only public entry point of the SDK.
 
-One Harness instance serves many concurrent agent turns safely.
+One SHAI instance serves many concurrent agent turns safely.
 Agent tools are resolved once at load_agent() time — no per-turn overhead.
 """
 from __future__ import annotations
@@ -14,6 +14,7 @@ from harness.adapters.scanners.rate_limiter import RateLimiter
 from harness.adapters.scanners.regex_pii import RegexPIIScanner
 from harness.adapters.scanners.injection_scan import InjectionScanner
 from harness.tools.registry import ToolRegistry
+from harness.tools.source import LocalSource, MCPSource, SourceRegistry
 from harness.agents.agent_config import AgentConfig
 from harness.agents.registry import AgentRegistry
 from harness.audit.emitter import AuditEmitter
@@ -68,6 +69,7 @@ class SHAI:
         tool_result_scanners: list,
         scan_tool_result_enabled: bool,
         tool_result_block_at: Severity,
+        source_registry: SourceRegistry,
     ) -> None:
         self._config              = config
         self._tenant_id           = config.tenant_id
@@ -90,6 +92,7 @@ class SHAI:
         self._tool_result_scanners      = tool_result_scanners
         self._scan_tool_result_enabled  = scan_tool_result_enabled
         self._tool_result_block_at      = tool_result_block_at
+        self._source_registry           = source_registry
         # Per-agent resolved tool sets — populated at load_agent() time
         # key: agent_id, value: {tool_name: Tool} for that agent
         self._agent_tools: dict[str, dict[str, Tool]] = {}
@@ -97,8 +100,8 @@ class SHAI:
     # ── Construction ──────────────────────────────────────────────────────
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "SHAI":
-        """Load harness.yaml and construct a fully wired Harness instance.
+    async def from_yaml(cls, path: str | Path) -> "SHAI":
+        """Load harness.yaml and construct a fully wired SHAI instance.
 
         Secret resolution:
           Resolves ${ENV_VAR} then secret:// URIs using EnvVarProvider.
@@ -155,6 +158,30 @@ class SHAI:
             if config.scan_tool_result.enabled else []
         )
 
+        # Build shared registries first — source_registry needs tool_registry
+        tool_registry   = ToolRegistry()
+        agent_registry  = AgentRegistry()
+
+        # Build SourceRegistry and register all declared sources
+        source_registry = SourceRegistry(policy)
+        for src_cfg in config.sources:
+            if src_cfg.transport == "mcp":
+                # Resolve credential values (already resolved by loader pass)
+                source = MCPSource(
+                    name=src_cfg.name,
+                    url=src_cfg.url,
+                    credentials=dict(src_cfg.credentials),
+                    tags=list(src_cfg.tags),
+                )
+            else:
+                # LOCAL — backed by the shared tool registry
+                source = LocalSource(
+                    name=src_cfg.name,
+                    registry=tool_registry,
+                    tags=list(src_cfg.tags),
+                )
+            await source_registry.register(source)
+
         rl_cfg = config.check_tool_call.rate_limit
         rate_limiter = (
             RateLimiter(
@@ -167,8 +194,8 @@ class SHAI:
 
         return cls(
             config=config,
-            agent_registry=AgentRegistry(),
-            tool_registry=ToolRegistry(),
+            agent_registry=agent_registry,
+            tool_registry=tool_registry,
             emitter=emitter,
             input_scanners=input_scanners,
             output_scanners=output_scanners,
@@ -186,6 +213,7 @@ class SHAI:
             tool_result_scanners=tool_result_scanners,
             scan_tool_result_enabled=config.scan_tool_result.enabled,
             tool_result_block_at=config.scan_tool_result.block_at,
+            source_registry=source_registry,
         )
 
     # ── Startup ───────────────────────────────────────────────────────────
@@ -207,22 +235,47 @@ class SHAI:
     async def load_agent(self, path: str | Path) -> AgentContext:
         """Load an agent-xx.yaml, resolve its tools, return an AgentContext.
 
-        The tool set for this agent is resolved once here and stored.
-        No per-turn registry lookup happens after this point.
+        Tool resolution merges two sources:
+          1. Tools registered directly via register_tools() (LOCAL/SKILL).
+          2. Tools discovered from the agent's declared sources (MCP and local).
+
+        The merged set is filtered to allowed_tool_names from the agent config.
+        Resolution happens once at load_agent() time — no per-turn overhead.
 
         Returns AgentContext — pass it to scan_input, check_tool_call,
         scan_output on every turn.
         """
         cfg = await self._agent_registry.load(path)
+        ctx = AgentContext(agent_id=cfg.id)
+
+        # Activate declared sources for this agent
+        source_tools = await self._source_registry.activate(ctx, list(cfg.sources))
+        # Register source-discovered tools into the shared registry so they
+        # are visible to check_tool_call and policy rules
+        for tool in source_tools:
+            try:
+                await self._tool_registry.register(tool)
+            except Exception as e:
+                log.warning("source tool registration failed — skipped",
+                            extra={"tool": tool.name, "error": str(e)})
+
         self._agent_tools[cfg.id] = self._resolve_tools(cfg)
         log.info("agent loaded",
                  extra={"agent_id": cfg.id,
-                        "tools": len(self._agent_tools[cfg.id])})
+                        "tools": len(self._agent_tools[cfg.id]),
+                        "source_tools": len(source_tools)})
         return AgentContext(agent_id=cfg.id)
 
     async def reload_agent(self, path: str | Path) -> AgentContext:
         """Reload an agent-xx.yaml and refresh its resolved tool set."""
         cfg = await self._agent_registry.reload(path)
+        ctx = AgentContext(agent_id=cfg.id)
+        source_tools = await self._source_registry.activate(ctx, list(cfg.sources))
+        for tool in source_tools:
+            try:
+                await self._tool_registry.register(tool)
+            except Exception:
+                pass
         self._agent_tools[cfg.id] = self._resolve_tools(cfg)
         log.info("agent reloaded",
                  extra={"agent_id": cfg.id,
@@ -362,8 +415,22 @@ class SHAI:
         )
 
     async def close(self) -> None:
-        """Flush and close all audit sinks. Call at process shutdown."""
+        """Flush and close all audit sinks and sources. Call at process shutdown."""
+        await self._source_registry.close()
         await self._emitter.close()
+
+    async def get_source(self, name: str) -> "MCPSource":
+        """Return a registered source by name.
+
+        Callers use this to get a reference to an MCPSource for direct tool
+        invocation after check_tool_call has gated the call.
+
+            gate   = await harness.check_tool_call(tool_name, args, ctx)
+            if gate.allowed:
+                source = await harness.get_source("my_mcp_server")
+                result = await source.call(tool_name, gate.redacted_args or args)
+        """
+        return await self._source_registry.get(name)
 
     # ── Internal helpers ──────────────────────────────────────────────────
 
@@ -466,6 +533,3 @@ def _build_sinks(adapter_refs: list) -> list:
         log.warning("no audit sinks configured — falling back to stdout")
         sinks = [StdoutSink()]
     return sinks
-
-# Backwards-compatibility alias — prefer SHAI
-Harness = SHAI

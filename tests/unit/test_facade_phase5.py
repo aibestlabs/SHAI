@@ -14,7 +14,7 @@ FIXTURES = Path(__file__).parent.parent / "fixtures"
 
 
 @pytest.fixture
-def harness(tmp_path: Path) -> SHAI:
+async def harness(tmp_path: Path) -> SHAI:
     cfg = tmp_path / "h.yaml"
     cfg.write_text(
         "version: 1\n"
@@ -23,7 +23,7 @@ def harness(tmp_path: Path) -> SHAI:
         "policy:\n  name: rules\n"
         "audit_sinks:\n  - name: stdout\n"
     )
-    return SHAI.from_yaml(cfg)
+    return await SHAI.from_yaml(cfg)
 
 
 @pytest.fixture

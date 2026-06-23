@@ -2,7 +2,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from harness.agents.agent_config import AgentConfig, RuleConfig, SubAgentConfig
-from harness.core.context import AgentContext, RuntimeContext  # RuntimeContext is an alias
+from harness.core.context import AgentContext
 from harness.core.errors import (
     AdapterDiscoveryError,
     AgentConflictError,
@@ -14,7 +14,7 @@ from harness.core.errors import (
     SubAgentNotDeclaredError,
     ToolNotRegisteredError,
 )
-from harness.core.harness import SHAI, Harness  # Harness = backwards-compat alias
+from harness.core.harness import SHAI
 from harness.core.types import BoundaryName, Decision, Severity, Transport
 from harness.core.verdicts import Finding, GateDecision, ScanVerdict
 from harness.tools.tool import Tool
@@ -26,10 +26,8 @@ except PackageNotFoundError:
 
 __all__ = [
     "SHAI",
-    "Harness",  # backwards-compat alias
     "Tool",
     "AgentContext",
-    "RuntimeContext",  # backward-compat alias
     "AgentConfig",
     "SubAgentConfig",
     "RuleConfig",

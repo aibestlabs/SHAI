@@ -35,7 +35,7 @@ async def _build_harness(tmp_path: Path, *, scan: bool = True) -> tuple[SHAI, St
         f"policy:\n  name: rules\n"
         f"audit_sinks:\n  - name: stdout\n"
     )
-    h = SHAI.from_yaml(cfg)
+    h = await SHAI.from_yaml(cfg)
     # Replace stdout sink with buffer sink for inspection
     h._emitter._sinks = [StdoutSink(stream=buf)]
     await h.load_agent(FIXTURES / "agents" / "orchestrator_agent.yaml")

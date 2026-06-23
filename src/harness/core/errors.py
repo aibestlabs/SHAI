@@ -67,3 +67,7 @@ class PolicyEvaluationError(HarnessError):
 
 class AuditEmissionError(HarnessError):
     """All configured sinks failed. Single sink failure is logged and swallowed."""
+
+class MCPInvocationError(HarnessError):
+    """MCP server returned a JSON-RPC error during tool invocation."""
+    pass

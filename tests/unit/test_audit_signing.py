@@ -143,7 +143,7 @@ async def test_harness_signing_disabled_by_default(tmp_path: Path):
         "policy:\n  name: rules\n"
         "audit_sinks:\n  - name: stdout\n"
     )
-    h = SHAI.from_yaml(cfg)
+    h = await SHAI.from_yaml(cfg)
     # Verify emitter has no signing secret
     assert h._emitter._signing_secret is None
 
@@ -165,5 +165,5 @@ async def test_harness_signing_enabled_via_env(tmp_path: Path, monkeypatch):
         "audit_sinks:\n  - name: stdout\n"
         "audit_signing:\n  enabled: true\n  secret: \"secret://AUDIT_KEY\"\n"
     )
-    h = SHAI.from_yaml(cfg)
+    h = await SHAI.from_yaml(cfg)
     assert h._emitter._signing_secret == b"mysecret"

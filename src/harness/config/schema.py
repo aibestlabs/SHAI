@@ -10,7 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from harness.core.errors import ConfigError
-from harness.core.types import Severity
+from harness.core.types import Severity, Transport
 
 
 class AdapterRef(BaseModel, frozen=True, extra="forbid"):
@@ -115,6 +115,32 @@ class ToolResultScanConfig(BaseModel, frozen=True, extra="forbid"):
     block_at: Severity = Severity.HIGH
 
 
+class SourceConfig(BaseModel, frozen=True, extra="forbid"):
+    """Configuration for one tool source declared in harness.yaml.
+
+    Local sources (transport: local) use already-registered tools — no url needed.
+    MCP sources (transport: mcp) connect to an MCP server at the given url.
+
+    credentials:  mapping of credential name to secret:// URI or literal value.
+                  Resolved via SecretsProvider at from_yaml() time.
+    tags:         tags applied to ALL tools returned by this source, merged with
+                  any tags declared on individual tools.
+    """
+    name:        str
+    transport:   Transport = Transport.LOCAL
+    url:         str | None = None
+    credentials: dict[str, str] = Field(default_factory=dict)
+    tags:        list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _transport_constraints(self) -> "SourceConfig":
+        if self.transport == Transport.MCP and not self.url:
+            raise ValueError(
+                f"source '{self.name}': url is required for mcp transport"
+            )
+        return self
+
+
 class HarnessConfig(BaseModel, frozen=True, extra="forbid"):
     version:         int = 1
     tenant_id:       str = "default"
@@ -125,6 +151,7 @@ class HarnessConfig(BaseModel, frozen=True, extra="forbid"):
     scan_output:     BoundaryConfig
     policy:          AdapterRef
     audit_sinks:     list[AdapterRef] = Field(default_factory=list)
+    sources:         list[SourceConfig]  = Field(default_factory=list)
     audit_signing:   AuditSigningConfig = Field(default_factory=AuditSigningConfig)
 
 

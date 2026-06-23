@@ -67,5 +67,3 @@ class AgentContext(BaseModel, frozen=True):
         }
 
 
-# Backward-compatibility alias — removed in next major version
-RuntimeContext = AgentContext

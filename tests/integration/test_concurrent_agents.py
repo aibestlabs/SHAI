@@ -45,7 +45,7 @@ async def _build_harness(tmp_path: Path) -> SHAI:
         "policy:\n  name: rules\n"
         "audit_sinks:\n  - name: stdout\n"
     )
-    h = SHAI.from_yaml(cfg)
+    h = await SHAI.from_yaml(cfg)
     h._emitter._sinks.append(RecordingSink())
     await h.load_agent(FIXTURES / "agents" / "orchestrator_agent.yaml")
     await h.register_tools([

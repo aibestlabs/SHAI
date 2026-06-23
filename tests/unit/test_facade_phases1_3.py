@@ -11,7 +11,7 @@ from harness.core.harness import SHAI
 
 
 @pytest.fixture
-def harness(tmp_path: Path) -> SHAI:
+async def harness(tmp_path: Path) -> SHAI:
     cfg = tmp_path / "harness.yaml"
     cfg.write_text(
         "version: 1\n"
@@ -20,7 +20,7 @@ def harness(tmp_path: Path) -> SHAI:
         "policy:\n  name: rules\n"
         "audit_sinks:\n  - name: stdout\n"
     )
-    return SHAI.from_yaml(cfg)
+    return await SHAI.from_yaml(cfg)
 
 
 async def test_load_and_list_agents(harness, orchestrator_yaml, research_yaml):
@@ -113,4 +113,4 @@ async def test_boundaries_are_wired_in_phase5(harness):
 
 async def test_from_yaml_missing_file():
     with pytest.raises(ConfigError):
-        SHAI.from_yaml("/nonexistent/path/harness.yaml")
+        await SHAI.from_yaml("/nonexistent/path/harness.yaml")
