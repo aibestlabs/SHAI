@@ -32,11 +32,6 @@ One structured audit event per boundary call, every time, regardless of outcome.
 pip install shai
 ```
 
-For MCP server connectivity:
-```bash
-pip install shai[mcp]
-```
-
 Requires Python 3.11+.
 
 ---
@@ -359,6 +354,28 @@ child_ctx = harness.scope_context_for_subagent(ctx, "research_sub")
 
 Sources declare where tools come from. They are activated at `load_agent()` time — not per turn.
 
+### Connector manifests (recommended)
+
+Use a pre-built connector manifest instead of hand-configuring sources:
+
+```yaml
+# harness.yaml
+sources:
+  - name: slack
+    connector: slack          # loads url, allowed_urls, tags, tool specs
+    credentials:
+      token: "secret://SLACK_BOT_TOKEN"
+
+  - name: github
+    connector: github
+    credentials:
+      token: "secret://GITHUB_TOKEN"
+```
+
+Available connectors (Tier A): `slack`, `github`, `notion`, `jira`, `gmail`, `postgresql`, `stripe`, `google_drive`.
+
+### Manual configuration
+
 ```yaml
 # harness.yaml
 sources:
@@ -476,7 +493,8 @@ All framework SDKs are imported lazily — integration modules are importable wi
 |---|---|---|
 | Anthropic SDK | `harness.integrations.anthropic_sdk` | `gated_dispatch`, `run_turn`, `make_tool_result_from_denial` |
 | LangGraph | `harness.integrations.langgraph` | `HarnessToolNode` — drop-in for `ToolNode` |
-| LangChain | `harness.integrations.langchain` | `wrap_tool`, `wrap_tools` |
+| LangChain (classic) | `harness.integrations.langchain` | `wrap_tool`, `wrap_tools` |
+| LangChain Agent Loop | `harness.integrations.langchain` | `ShaiMiddleware` — passed to `create_agent(middleware=[...])`  |
 | CrewAI | `harness.integrations.crewai` | `wrap_tool`, `wrap_tools` |
 | PydanticAI | `harness.integrations.pydantic_ai` | `harness_tool` decorator, `add_harness_middleware` |
 | OpenAI Agents | `harness.integrations.openai_agents` | `make_before_tool_hook`, `wrap_tool` |
@@ -486,9 +504,15 @@ All framework SDKs are imported lazily — integration modules are importable wi
 from harness.integrations.langgraph import HarnessToolNode
 tool_node = HarnessToolNode(tools=[search, send_email], harness=harness, ctx=ctx)
 
-# LangChain — wrap existing BaseTool
+# LangChain classic — wrap existing BaseTool
 from harness.integrations.langchain import wrap_tools
 gated = wrap_tools([search, send_email], harness=harness, ctx=ctx)
+
+# LangChain Agent Loop — pass as middleware to create_agent
+from harness.integrations.langchain import ShaiMiddleware
+from langchain.agents import create_agent
+middleware = await ShaiMiddleware.create(tools, harness=harness, ctx=ctx)
+agent = create_agent(llm, tools=tools, middleware=[middleware])
 
 # Anthropic SDK — gate then dispatch
 from harness.integrations.anthropic_sdk import gated_dispatch, make_tool_result_from_denial
@@ -565,8 +589,8 @@ pytest tests/perf/ -v -s   # prints timings
 
 | Package | License | Description |
 |---|---|---|
-| `shai` | Apache-2.0 | Core SDK + reference adapters + CLI |
-| `shai[mcp]` | Apache-2.0 | + httpx for MCP server connectivity |
+| `shai` | Apache-2.0 | Core SDK + reference adapters + CLI + httpx (MCP built in) |
+| `shai-gateway` | Apache-2.0 | Egress enforcement — ShaiTransport + gateway process (planned) |
 
 ---
 

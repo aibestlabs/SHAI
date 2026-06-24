@@ -163,3 +163,4 @@ def test_source_config_mcp_with_connector_no_url_passes():
     )
     assert cfg.connector == "slack"
     assert cfg.url is None   # url comes from manifest at from_yaml() time
+

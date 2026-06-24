@@ -61,10 +61,15 @@ src/
 │   │   ├── secrets/
 │   │   │   └── env.py            ← EnvVarProvider — resolves secret:// URIs from env
 │   │   └── discovery.py          ← entry-point discovery and caching
+│   ├── connectors/
+│   │   ├── __init__.py       ← ConnectorManifest, load_manifest, list_connectors
+│   │   └── manifests/        ← 8 Tier A YAML manifests
+│   │       slack.yaml, github.yaml, notion.yaml, jira.yaml
+│   │       gmail.yaml, postgresql.yaml, stripe.yaml, google_drive.yaml
 │   └── integrations/
 │       ├── anthropic_sdk.py  ← gated_dispatch, run_turn, make_tool_result_from_denial
 │       ├── langgraph.py      ← HarnessToolNode
-│       ├── langchain.py      ← wrap_tool, wrap_tools
+│       ├── langchain.py      ← wrap_tool, wrap_tools, ShaiMiddleware (Agent Loop)
 │       ├── crewai.py         ← wrap_tool, wrap_tools
 │       ├── pydantic_ai.py    ← harness_tool decorator, add_harness_middleware
 │       └── openai_agents.py  ← make_before_tool_hook, wrap_tool
@@ -179,7 +184,7 @@ A named, curated subset of registered tools. `transport=Transport.SKILL` enables
 
 Connects to an MCP server via SSE, runs the JSON-RPC initialize handshake, fetches the tool catalog with `tools/list`, and exposes `call(tool_name, args)` for dispatch. Tools are stamped `transport=Transport.MCP`.
 
-Requires `pip install shai[mcp]` (adds `httpx>=0.27`). If httpx is absent, `load()` raises `ConfigError` with a clear install message.
+`httpx>=0.27` is included in `shai` core. No extra install needed.
 
 By default (`required: true`) a failed MCP connection at `load_agent()` time raises `ConfigError` — the agent is not usable without it. Set `required: false` in `SourceConfig` for optional sources where degraded operation is acceptable.
 
@@ -306,6 +311,7 @@ HarnessError
 ├── ToolNotRegisteredError       ← tool name not in ToolRegistry
 ├── PolicyEvaluationError        ← engine failure (not a normal deny)
 ├── AuditEmissionError           ← all sinks failed
+├── NetworkPolicyError           ← ShaiTransport blocked an outbound request
 └── MCPInvocationError           ← MCP server returned JSON-RPC error
 ```
 
@@ -332,36 +338,35 @@ at the agent resolution layer. The LLM call interface is unchanged; the gate
 resolves the source internally and evaluates policy against the
 source-specific `Tool` object.
 
-### shai-connectivity (planned)
+### shai-connectivity
 
-Network-layer enforcement via dispatch tokens. See `docs/connectivity.md`.
+**Phase 1 (done):** Dispatch token issuance in `check_tool_call`. `DispatchToken`, `GateDecision.dispatch_token`, `ConnectivityConfig`.
+
+**Phase 2 (done):** `ShaiTransport` — in-process httpx transport hook enforcing `allowed_urls`, `allowed_methods`, token validation, `NetworkAuditEvent` emission. Wired into `MCPSource._connect()` when `connectivity.enabled`.
+
+**Phases 3–5 (planned):** L7 policy, `shai-inference-router`, eBPF enforcement. See `docs/connectivity.md`.
 
 
-### shai-connectors — manifest registry (0.2.x)
+### shai-connectors — manifest registry ✓ DONE
 
-Curated YAML manifests that wrap community MCP servers with correct SHAI
-security configuration: tool tags, `allowed_urls`, scan policies, auth
-schemas. Operators reference a connector by name instead of hand-configuring
-source entries.
+8 Tier A connector manifests ship in `shai` core under `harness/connectors/manifests/`:
+`slack`, `github`, `notion`, `jira`, `gmail`, `postgresql`, `stripe`, `google_drive`.
 
 ```yaml
 sources:
-  - connector: slack
+  - name: slack
+    connector: slack
     credentials:
       token: "secret://SLACK_BOT_TOKEN"
 ```
 
-Initial set: Slack, WhatsApp, Gmail, GitHub, Notion, Linear, Jira,
-Google Drive, Microsoft Teams. Manifests ship in `shai-connectors`;
-MCP servers come from the community or service-hosted endpoints.
+Each manifest supplies: `url`, `allowed_urls`, `allowed_methods`, `tags`, per-tool security specs (`action: block` on all `external_write` tools), and `scan_tool_result_on` declarations. Tier B/C connectors are planned for the enterprise edition.
 
-### shai-local-connectors — local service MCP servers (0.2.x)
+### shai-local-connectors — local service MCP servers (future)
 
-Lightweight MCP servers for locally-installed services that have no hosted
-MCP: Apple Notes, Obsidian, SQLite, filesystem. Distributed as
-`shai-local-connectors`. Pre-wired with `allowed_urls: []` (no outbound
-network), `allowed_paths` scoping, and `sensitive` tags on write tools.
-Local process lifecycle managed by the harness (`load_agent` / `close()`).
+**Design decision:** local connector manifests are NOT in `shai` core. A manifest without its MCP server process is misleading — it loads cleanly but fails at connection time. The manifest and the managed process must ship together.
+
+Planned as a separate package `shai-local-connectors`: Apple Notes (macOS), Obsidian, SQLite, filesystem. Entry point registration so `load_manifest('obsidian')` discovers the manifest after install. `allowed_paths` field added to `SourceConfig` at that time.
 
 ### MCPSource live tests
 

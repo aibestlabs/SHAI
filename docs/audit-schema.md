@@ -160,3 +160,42 @@ jq 'select(.signature == null)' audit.jsonl
 # High-severity findings on input
 jq 'select(.boundary == "input_scan" and .max_severity == "high")' audit.jsonl
 ```
+
+---
+
+## NetworkAuditEvent
+
+Emitted by `ShaiTransport` for every outbound MCP request when `connectivity.enabled: true`. Written to the same `AuditEmitter` sinks as `AuditEvent`, distinguished by `event_type: "network_egress"`.
+
+| Field | Type | Description |
+|---|---|---|
+| `timestamp` | ISO 8601 | UTC time of the request |
+| `event_type` | `"network_egress"` | Distinguishes from boundary `AuditEvent` |
+| `token_id` | `str \| null` | `DispatchToken.token_id` — join key with gate `AuditEvent` |
+| `source_name` | `str` | `MCPSource.name` |
+| `agent_id` | `str` | From `AgentContext` |
+| `sub_agent_id` | `str \| null` | From `AgentContext` |
+| `tenant_id` | `str` | From `HarnessConfig` |
+| `tool_name` | `str \| null` | Tool being called (`null` for SSE/init requests) |
+| `destination` | `str` | Full URL of the outbound request |
+| `method` | `str` | HTTP method (`GET`, `POST`, etc.) |
+| `status` | `"allowed" \| "denied"` | Enforcement outcome |
+| `deny_reason` | `str \| null` | Set when `status="denied"` |
+| `bytes_sent` | `int` | Request body size in bytes |
+| `bytes_recv` | `int` | Response body size in bytes |
+| `duration_ms` | `int` | Round-trip time in milliseconds |
+
+### SIEM correlation
+
+`token_id` joins `NetworkAuditEvent` with the `AuditEvent` emitted by `check_tool_call` for the same gate decision:
+
+```sql
+SELECT h.boundary, h.decision, h.tool_name,
+       n.destination, n.status, n.bytes_recv, n.duration_ms
+FROM harness_audit h
+JOIN network_audit n ON h.token_id = n.token_id
+WHERE h.agent_id = 'orchestrator_agent'
+ORDER BY h.timestamp
+```
+
+Events with `token_id = null` are SSE connection or initialization requests — no gate decision was made for them.

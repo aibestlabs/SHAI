@@ -353,18 +353,24 @@ sources:
 
 ## Implementation phases
 
-**Phase 1 — Token issuance (SHAI harness changes)**
-- `DispatchToken` dataclass
-- Token signing in `check_tool_call` when `connectivity.enabled`
+**Phase 1 — Token issuance ✓ DONE**
+- `DispatchToken` dataclass, `sign_token()`, `verify_token()`
+- Token issued in `check_tool_call` when `connectivity.enabled`
 - `GateDecision.dispatch_token` field
 - `connectivity` block in `HarnessConfig`
 - `allowed_urls` / `allowed_methods` on `SourceConfig`
 
-**Phase 2 — Egress gateway (new package `shai-gateway`)**
-- HTTP/HTTPS proxy with token validation
+**Phase 2 — ShaiTransport (in-process enforcement) ✓ DONE**
+- `ShaiTransport(httpx.AsyncBaseTransport)` in `connectivity/transport.py`
+- Per-request: URL enforcement → method enforcement → token validation → `X-Shai-Token` injection → forward → emit `NetworkAuditEvent`
+- `NetworkAuditEvent` — `event_type="network_egress"`, `token_id` join key, same `AuditEmitter` sinks
+- `NetworkPolicyError` for enforcement violations
+- Wired into `MCPSource._connect()` when `connectivity.enabled`
+
+**Phase 3 — Egress gateway (planned — `shai-gateway` package)**
+- External HTTP/HTTPS proxy with token validation
 - Nonce store (Redis or in-memory with TTL)
-- `NetworkAuditEvent` emission
-- Configurable no-token policy
+- Configurable no-token policy for non-MCP traffic
 
 **Phase 3 — L7 policy**
 - YAML rule engine in the gateway
@@ -385,9 +391,8 @@ sources:
 
 ## Current status
 
-Not implemented. Phase 1 (token issuance) is the immediate next step.
-It requires no new packages — only changes to `shai` itself.
+**Phase 1 (token issuance) — done.** `DispatchToken`, `sign_token()`, `verify_token()`, `GateDecision.dispatch_token`, `AuditEvent.token_id` are all implemented and tested.
 
-Process isolation (recommended today) is described in `ARCHITECTURE.md`
-under the connectivity section. It is the strongest available mitigation
-until the gateway ships.
+**Phase 2 (ShaiTransport) — done.** `ShaiTransport` enforces `allowed_urls`, `allowed_methods`, and token validity on every outbound MCP request. `NetworkAuditEvent` is emitted per call and written to configured audit sinks. Enable with `connectivity.enabled: true` in `harness.yaml`.
+
+**Phases 3–5 (planned).** External gateway process, inference router, eBPF enforcement. Process isolation (described in `ARCHITECTURE.md`) is the strongest available mitigation for non-MCP traffic until the gateway ships.

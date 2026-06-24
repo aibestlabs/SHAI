@@ -24,7 +24,25 @@ Tools from sources are merged into the shared `ToolRegistry` and filtered to the
 
 ---
 
-## Declaring sources in harness.yaml
+## Connector manifests (recommended)
+
+Use a pre-built connector manifest to avoid hand-configuring `url`, `allowed_urls`, `tags`, and tool specs:
+
+```yaml
+sources:
+  - name: slack
+    connector: slack          # loads url, allowed_urls, tags, tool specs
+    credentials:
+      token: "secret://SLACK_BOT_TOKEN"
+```
+
+Available: `slack`, `github`, `notion`, `jira`, `gmail`, `postgresql`, `stripe`, `google_drive`.
+
+Operator-declared fields override manifest defaults. Credentials are always operator-supplied — never from the manifest.
+
+---
+
+## Manual source configuration
 
 ```yaml
 sources:
@@ -95,7 +113,7 @@ sources:
 
 Connects to an MCP server over SSE (Server-Sent Events), runs the JSON-RPC initialize handshake, and fetches the tool catalog with `tools/list`. Returned tools are stamped `transport=Transport.MCP`.
 
-**Requires `pip install shai[mcp]`** (`httpx>=0.27`). If httpx is absent, `load()` raises `ConfigError` with a clear install message.
+`httpx>=0.27` is included in `shai` core. No extra install needed.
 
 ### Connection protocol
 

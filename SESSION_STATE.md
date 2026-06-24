@@ -369,17 +369,28 @@ Manifests are a convenience layer, not a constraint.
 
 ---
 
-### [0.2.x] shai-local-connectors — local service MCP servers
+### [future] shai-local-connectors — local service MCP servers
+
+**Design decision:** Local connector manifests are NOT shipped in `shai` core.
+A manifest without its MCP server process is misleading — it loads cleanly
+but fails at connection time. The manifest and the process must ship together.
+
+**Package boundary:**
+```
+shai                  → ConnectorManifest model, load_manifest(), Tier A manifests
+shai-local-connectors → local manifests + managed MCP server processes
+```
+`load_manifest()` will be extended to check `importlib.resources` entry points
+registered by `shai-local-connectors`, giving a helpful install hint when a
+local connector is requested but the package is not installed.
 
 **Problem.** Locally-installed services (Apple Notes, Obsidian, local SQLite,
 local filesystem) cannot use hosted MCP servers. They need a local MCP process
-that talks to the service via local APIs or file paths. The community does not
-serve this well. These are common productivity tools that agents benefit from
-having read/write access to under SHAI's policy gate.
+that talks to the service via local APIs or file paths.
 
 **Approach.** Lightweight MCP servers — one per service — distributed as a
-`shai-local-connectors` package (Python + TypeScript). Each server exposes
-a small, well-defined tool set with pre-wired SHAI tags.
+`shai-local-connectors` package. Each server exposes a small, well-defined
+tool set with pre-wired SHAI tags.
 
 **Initial local connector set:**
 
@@ -432,10 +443,13 @@ auth:
   type: none               # local filesystem access, no auth
 ```
 
-**SHAI harness changes needed:** same as `shai-connectors` above — `connector:`
-field on `SourceConfig`. For local connectors, `from_yaml()` additionally
-spawns the local MCP process and manages its lifecycle (start on
-`load_agent()`, stop on `close()`).
+**Scope (separate package, separate session):**
+- `shai-filesystem-mcp`, `shai-sqlite-mcp`, `shai-obsidian-mcp`, `shai-apple-notes-mcp`
+  (macOS only) — managed subprocess per connector
+- `from_yaml()` spawns processes, manages lifecycle (start on `load_agent()`, stop on `close()`)
+- `allowed_paths` field added to `SourceConfig` at that time — enforced at I/O level
+- Entry point registration so `load_manifest('obsidian')` works after install
+- Distributed as `pip install shai-local-connectors` with platform extras
 
 ---
 

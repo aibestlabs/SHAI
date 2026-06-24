@@ -111,12 +111,12 @@ def manifest_to_source_config_fields(
     Returns a dict suitable for SourceConfig.model_validate().
     """
     fields: dict[str, Any] = {
-        "transport":      "mcp",
-        "url":            manifest.url,
-        "allowed_urls":   manifest.allowed_urls,
+        "transport":       "mcp",
+        "url":             manifest.url,
+        "allowed_urls":    manifest.allowed_urls,
         "allowed_methods": manifest.allowed_methods,
-        "tags":           manifest.tags,
-        "required":       manifest.required,
+        "tags":            manifest.tags,
+        "required":        manifest.required,
     }
     # Operator overrides take precedence
     fields.update({k: v for k, v in overrides.items() if v is not None})
