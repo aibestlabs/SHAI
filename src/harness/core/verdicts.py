@@ -64,6 +64,9 @@ class GateDecision(BaseModel, frozen=True):
     deny_reason:    str | None = None
     redacted_args:  dict[str, Any] | None = None
     dispatch_token: str | None = None
+    source_name:    str | None = None
+    # Resolved source name — 'local' for LOCAL/SKILL tools, MCP source name
+    # for remote tools. Set by check_tool_call from the agent's resolved tool set.
 
     @model_validator(mode="after")
     def _deny_requires_reason(self) -> "GateDecision":

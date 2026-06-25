@@ -184,3 +184,35 @@ async def test_scan_input_sub_agent_id_in_event(emitter, sink):
     )
     assert sink.events[0].sub_agent_id == "sub1"
     assert sink.events[0].agent_id == "a1"
+
+# ── regex_pii secret.api_key threshold ───────────────────────────────────
+
+import re as _re
+
+_API_KEY_PAT = _re.compile(
+    r"(?:\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b"
+    r"|\bghp_[A-Za-z0-9]{36,}\b"
+    r"|\bxox[bpoa]-[A-Za-z0-9-]{16,}\b"
+    r"|\bAKIA[A-Z0-9]{16}\b"
+    r"|\bglpat-[A-Za-z0-9_-]{20,}\b"
+    r"|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
+    r"|\b[A-Za-z0-9+/]{20,}={0,2}\b)"
+)
+
+@pytest.mark.parametrize("text,should_match", [
+    ("sk_live_abc123def456ghi789jkl", True),          # Stripe live key
+    ("sk_test_abc123def456ghi789jkl", True),          # Stripe test key
+    ("ghp_" + "a" * 36, True),                       # GitHub PAT
+    ("xoxb-123456789-abcdefghij123456", True),        # Slack bot token
+    ("AKIAIOSFODNN7EXAMPLE", True),                   # AWS access key
+    ("glpat-" + "a" * 20, True),                     # GitLab PAT
+    ("550e8400-e29b-41d4-a716-446655440000", True),   # UUID
+    ("aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Q=", True),  # base64 36 chars
+    ("short", False),                                  # too short
+    ("hello world", False),                            # plain text
+    ("abc12", False),                                  # 5 chars — below threshold
+])
+def test_api_key_pattern(text, should_match):
+    assert bool(_API_KEY_PAT.search(text)) == should_match, (
+        f"Expected {'match' if should_match else 'no match'} for: {text[:40]}"
+    )

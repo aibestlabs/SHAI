@@ -162,6 +162,10 @@ await harness.close()   # flushes audit sinks, closes MCP connections
 
 ---
 
+## What SHAI protects automatically
+
+**At tool registration** — `MCPMetadataScanner` scans every tool name, description, and argument schema received from an MCP server's `tools/list` response. Tools carrying injection payloads in their metadata are blocked before registration.
+
 ## What gets audited
 
 Every call to any boundary method emits exactly one `AuditEvent`.

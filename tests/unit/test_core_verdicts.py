@@ -65,3 +65,23 @@ def test_finding_no_raw_text_in_detail():
     f = Finding(scanner="test", category="pii.ssn", severity=Severity.HIGH,
                 detail="SSN pattern detected")
     assert "123-45-6789" not in (f.detail or "")
+
+
+# ── GateDecision.source_name ──────────────────────────────────────────────
+
+def test_gate_decision_carries_source_name():
+    from harness.core.verdicts import GateDecision
+    gate = GateDecision(allowed=True, source_name="slack_mcp")
+    assert gate.source_name == "slack_mcp"
+
+
+def test_gate_decision_source_name_defaults_none():
+    from harness.core.verdicts import GateDecision
+    gate = GateDecision(allowed=True)
+    assert gate.source_name is None
+
+
+def test_gate_decision_denied_no_source_name():
+    from harness.core.verdicts import GateDecision
+    gate = GateDecision(allowed=False, deny_reason="not allowed")
+    assert gate.source_name is None

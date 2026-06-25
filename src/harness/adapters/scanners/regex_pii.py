@@ -9,7 +9,8 @@ Pattern categories:
   pii.ssn            high     US Social Security Number
   pii.credit_card    high     Luhn-validated 13–16 digit sequences
   network.ipv4       low      dotted-quad addresses
-  secret.api_key     medium   long base64/hex tokens (32+ chars)
+  secret.api_key     medium   API key tokens (20+ chars), UUIDs, common key prefixes
+                              (sk_live_, ghp_, xoxb-, AKIA, glpat-)
   secret.credential  high     inline credential disclosure
                               e.g. "my password is X", "credentials: X",
                               "token: X", "api_key=X"
@@ -63,7 +64,21 @@ _PATTERNS: list[tuple[str, Severity, re.Pattern]] = [
     (
         "secret.api_key",
         Severity.MEDIUM,
-        re.compile(r"\b[A-Za-z0-9+/]{32,}={0,2}\b"),
+        # Matches:
+        # - Raw base64/hex tokens >= 20 chars (lowered from 32 — catches UUIDs,
+        #   short API keys like Stripe sk_live_xxx, GitHub ghp_xxx)
+        # - Common key prefixes: sk_live_, ghp_, xoxb-, AKIA (AWS), glpat- (GitLab)
+        re.compile(
+            r"(?:"
+            r"\b(?:sk_live|sk_test|rk_live|rk_test)_[A-Za-z0-9]{16,}\b"
+            r"|\bghp_[A-Za-z0-9]{36,}\b"
+            r"|\bxox[bpoa]-[A-Za-z0-9-]{16,}\b"
+            r"|\bAKIA[A-Z0-9]{16}\b"
+            r"|\bglpat-[A-Za-z0-9_-]{20,}\b"
+            r"|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
+            r"|\b[A-Za-z0-9+/]{20,}={0,2}\b"
+            r")"
+        ),
     ),
     (
         "secret.credential",

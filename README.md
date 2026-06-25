@@ -166,6 +166,7 @@ SHAI addresses the [OWASP Agentic AI Threats and Mitigations](https://genai.owas
 | `scan_output` — RegexPIIScanner | `adapters/scanners/regex_pii.py` | **T11** Sensitive Data Exposure, **T16** Data Exfiltration |
 | Rate limiter (R1) | `adapters/scanners/rate_limiter.py` | **T4** Resource Overload, **T2** Tool Misuse (flooding) |
 | Arg scanning (L4) | `boundaries/check_tool_call.py` | **T11** Sensitive Data Exposure, **T2** Tool Misuse |
+| `MCPMetadataScanner` — tool description scan | `adapters/scanners/mcp_metadata_scanner.py` | **T1** Goal Hijacking, **T6** Indirect Injection, **T17** Supply Chain |
 | `FileScanner` — structural checks | `adapters/scanners/file_scanner.py` | **T3** Uncontrolled Agent Actions, **T17** Supply Chain |
 | Audit event signing (R3) | `audit/emitter.py` | **T8** Repudiation and Untraceability |
 | Tamper-evident audit trail | `audit/emitter.py`, `core/events.py` | **T8** Repudiation and Untraceability |
@@ -177,7 +178,7 @@ SHAI addresses the [OWASP Agentic AI Threats and Mitigations](https://genai.owas
 
 | OWASP Threat | Coverage | Controls |
 |---|---|---|
-| **T1** Agent Goal/Instruction Hijacking | Partial | InjectionScanner on input, `allowed_tool_names` hard gate |
+| **T1** Agent Goal/Instruction Hijacking | Full | InjectionScanner on input, `allowed_tool_names` hard gate, `MCPMetadataScanner` at tool registration |
 | **T2** Tool Misuse | Full | L1 hard gate, L2 tag gate, L3 policy, rate limiter, arg scanning |
 | **T3** Uncontrolled Agent Actions | Full | L1–L3 gates, subagent scoping, source suppression |
 | **T4** Resource Overload | Full | Rate limiter (global + per-tool sliding window) |
@@ -187,9 +188,9 @@ SHAI addresses the [OWASP Agentic AI Threats and Mitigations](https://genai.owas
 | **T9** Privilege Escalation | Full | Subagent capability gate, policy intersection model |
 | **T11** Sensitive Data Exposure | Full | RegexPII on input + output, arg scanning for `sensitive` tools |
 | **T16** Data Exfiltration | Partial | RegexPII on output; network-layer enforcement is planned |
-| **T17** Supply Chain | Partial | FileScanner structural checks, source suppression, secret resolution |
+| **T17** Supply Chain | Full | FileScanner structural checks, `MCPMetadataScanner` at registration, source suppression, secret resolution |
 
-*Partial coverage indicates the control addresses the threat at the application layer. Network-layer enforcement (planned as `shai-connectivity`) would provide deeper coverage for T16 and T17.*
+*T16 partial coverage: `RegexPII` on output catches data in responses; network-layer enforcement via `ShaiTransport` covers MCP egress. Full T16 closure requires `shai-gateway` for non-MCP traffic (planned).*
 
 ---
 

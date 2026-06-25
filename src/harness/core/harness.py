@@ -117,7 +117,10 @@ class SHAI:
         self._source_registry           = source_registry
         # Per-agent resolved tool sets — populated at load_agent() time
         # key: agent_id, value: {tool_name: Tool} for that agent
-        self._agent_tools: dict[str, dict[str, Tool]] = {}
+        # Composite tool identity: agent_id → {tool_name: (source_name, Tool)}
+        # source_name is 'local' for LOCAL/SKILL tools, MCP source name for remote.
+        # Populated at load_agent() time — no per-turn lookup needed.
+        self._agent_tools: dict[str, dict[str, tuple[str, Tool]]] = {}
         # Per-agent source-enriched tool overrides — keyed by agent_id then tool name.
         # When a source merges tags onto a tool, the enriched Tool is stored here
         # and takes precedence over the registry entry in _resolve_tools.
@@ -498,9 +501,12 @@ class SHAI:
             await self._emitter.emit(event)
             return GateDecision(allowed=False, deny_reason=reason)
 
-        tools  = self._agent_tools.get(ctx.agent_id, {})
-        # Look up source name for this tool — needed for dispatch token
-        source_name = self._tool_source_name(name)
+        # Composite tool identity: (source_name, Tool) tuple
+        agent_tool_map = self._agent_tools.get(ctx.agent_id, {})
+        tool_entry     = agent_tool_map.get(name)
+        source_name    = tool_entry[0] if tool_entry else "local"
+        # Pass flat {name: Tool} to run_gate — gate only needs the Tool
+        tools = {k: v[1] for k, v in agent_tool_map.items()}
 
         gate = await run_gate(
             name, args, ctx,
@@ -546,17 +552,27 @@ class SHAI:
                 ttl_seconds=self._connectivity.token_ttl_seconds,
             )
             encoded = encode_token(token)
-            # Rebuild GateDecision with token attached
+            # Rebuild GateDecision with token and source_name
             gate = GateDecision(
                 allowed=True,
                 redacted_args=gate.redacted_args,
                 dispatch_token=encoded,
+                source_name=source_name,
             )
             log.debug("dispatch token issued",
                       extra={"agent_id": ctx.agent_id, "tool": name,
                              "token_id": token.token_id,
                              "expires_at": token.expires_at.isoformat()})
 
+        # Stamp source_name on the gate decision if not already set
+        if gate.allowed and gate.source_name is None:
+            gate = GateDecision(
+                allowed=gate.allowed,
+                deny_reason=gate.deny_reason,
+                redacted_args=gate.redacted_args,
+                dispatch_token=gate.dispatch_token,
+                source_name=source_name,
+            )
         return gate
 
     async def scan_file(self, path: str | Path, ctx: AgentContext) -> ScanVerdict:
@@ -690,46 +706,58 @@ class SHAI:
         return await self._source_registry.get(name)
 
     # ── Internal helpers ──────────────────────────────────────────────────
-    def _tool_source_name(self, tool_name: str) -> str:
-        """Return the source name that owns tool_name, or 'local' if not from MCP.
+    def _source_name_for_tool(self, tool_name: str, tool: "Tool") -> str:
+        """Return the source name for a Tool object.
 
-        Checks connector_tool_specs on MCP sources first (most precise),
-        then falls back to explicit tool_names lists, then to the first
-        MCP source with no tool_names restriction.
+        Uses the Tool's transport to determine the source type:
+        - LOCAL/SKILL → 'local'
+        - MCP → look up via connector_tool_specs or tool_names on source configs
+
+        Called once per tool at _resolve_tools() time — no per-turn overhead.
         """
+        from harness.core.types import Transport
+        if tool.transport != Transport.MCP:
+            return "local"
+        # Check connector manifests first — most precise
         for src_cfg in self._config.sources:
             if src_cfg.transport != "mcp":
                 continue
-            # Connector manifest explicitly lists this tool
             if tool_name in src_cfg.connector_tool_specs:
                 return src_cfg.name
-            # Explicit tool_names allowlist
             if src_cfg.tool_names and tool_name in src_cfg.tool_names:
                 return src_cfg.name
-        # No explicit match — fall back to first unrestricted MCP source
+        # Fall back to first unrestricted MCP source
         for src_cfg in self._config.sources:
             if src_cfg.transport == "mcp" and not src_cfg.tool_names:
                 return src_cfg.name
         return "local"
 
-    def _resolve_tools(self, cfg: AgentConfig) -> dict[str, Tool]:
-        """Build the {name: Tool} dict for an agent at startup.
+    def _resolve_tools(self, cfg: AgentConfig) -> "dict[str, tuple[str, Tool]]":
+        """Build the {tool_name: (source_name, Tool)} dict for an agent at startup.
 
-        Source-enriched overrides (tags merged from SourceConfig) take
-        precedence over the registry entry so the gate evaluates policy
-        against the fully-enriched tag set. This ensures that source_tags
-        in policy rules match correctly even when a tool was pre-registered
-        with fewer tags.
+        Composite identity: every tool carries its source_name so the gate
+        always knows which source the tool belongs to without a separate lookup.
+        source_name is 'local' for LOCAL/SKILL tools, the MCP source name
+        for remote tools.
         """
         all_tools   = self._tool_registry.as_dict()
         overrides   = self._source_overrides.get(cfg.id, {})
         agent_names = set(cfg.allowed_tool_names)
-        resolved = {name: tool for name, tool in all_tools.items()
-                    if name in agent_names}
+
+        resolved: dict[str, tuple[str, Tool]] = {}
+
+        for name, tool in all_tools.items():
+            if name not in agent_names:
+                continue
+            source_name = self._source_name_for_tool(name, tool)
+            resolved[name] = (source_name, tool)
+
         # Apply enriched overrides — replaces registry entry for this agent only
         for name, tool in overrides.items():
             if name in agent_names:
-                resolved[name] = tool
+                source_name = self._source_name_for_tool(name, tool)
+                resolved[name] = (source_name, tool)
+
         return resolved
 
     def _audit_tags_for(self, ctx: AgentContext) -> dict[str, str]:

@@ -444,7 +444,8 @@ async def test_source_tags_visible_in_agent_tool_set(tmp_path):
     resolved = harness._agent_tools["test_agent"]
     assert "search_docs" in resolved, "search_docs not in agent tool set"
 
-    tool_tags = set(resolved["search_docs"].tags)
+    _, resolved_tool = resolved["search_docs"]   # unpack (source_name, Tool)
+    tool_tags = set(resolved_tool.tags)
     assert "read"      in tool_tags, "base tag 'read' missing"
     assert "sensitive" in tool_tags, \
         f"source tag 'sensitive' silently dropped — gate sees {tool_tags}"
@@ -493,8 +494,10 @@ async def test_other_agents_not_affected_by_source_override(tmp_path):
     await harness.load_agent(agent_a)
     await harness.load_agent(agent_b)
 
-    tags_a = set(harness._agent_tools["agent_a"]["search_docs"].tags)
-    tags_b = set(harness._agent_tools["agent_b"]["search_docs"].tags)
+    _, tool_a = harness._agent_tools["agent_a"]["search_docs"]
+    _, tool_b = harness._agent_tools["agent_b"]["search_docs"]
+    tags_a = set(tool_a.tags)
+    tags_b = set(tool_b.tags)
 
     assert "sensitive" in tags_a, "agent_a should see source-enriched tags"
     assert "sensitive" not in tags_b, "agent_b must not be affected by agent_a's source override"
