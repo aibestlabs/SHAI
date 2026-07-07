@@ -2,13 +2,21 @@
 
 Commands:
   shai validate           Validate harness.yaml and all agent files.
-  shai agents list        List all registered agents.
-  shai audit tail         Tail an audit JSONL log file.
+                          Shows: boundaries, execution budget, session config.
+  shai agents list        List all registered agents and subagents.
+  shai audit tail         Tail an audit JSONL log file with decision filtering.
+                          Surfaces: argument violations, irreversibility blocks,
+                          session escalations, and de-obfuscation signals.
 
 Usage:
-  shai validate [--config PATH]
-  shai agents list [--config PATH]
-  shai audit tail [--file PATH] [--follow]
+  shai validate [--config PATH] [--agents-dir DIR]
+  shai agents list --agents-dir DIR [--config PATH]
+  shai audit tail [--file PATH] [--follow] [--boundary NAME] [--decision DECISION]
+
+Audit tail examples:
+  shai audit tail --file logs/audit.jsonl --follow
+  shai audit tail --file logs/audit.jsonl --boundary tool_call_gate --decision deny
+  shai audit tail --file logs/audit.jsonl --decision deny --last 50
 """
 from __future__ import annotations
 

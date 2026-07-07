@@ -71,3 +71,15 @@ class ScanStatus(StrEnum):
     WARN  = "warn"
     BLOCK = "block"
 
+
+
+class Irreversibility(StrEnum):
+    """Blast-radius classification for a tool.
+
+    REVERSIBLE   — default; no extra gate.
+    SENSITIVE    — denied unless ctx.human_approved is True.
+    IRREVERSIBLE — denied unless ctx.human_approved is True.
+    """
+    REVERSIBLE   = "reversible"
+    SENSITIVE    = "sensitive"
+    IRREVERSIBLE = "irreversible"

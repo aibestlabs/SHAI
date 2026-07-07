@@ -1,15 +1,17 @@
 """check_tool_call — the mandatory tool-call gate.
 
-Four layers, strict order. Exactly one AuditEvent per call.
+Five layers, strict order. Exactly one AuditEvent per call.
 Never dispatches the tool — gates only.
 
 Receives pre-resolved AgentConfig and tools dict from the Harness instance.
 No registry lookups on the hot path.
 
 Layer 1: tool.name in agent's allowed_tool_names?  (hard pre-policy gate)
-Layer 2: tool.tags ⊆ ctx.allowed_tags?             (subagent capability gate)
-Layer 3: intersection policy (subagent ∩ parent ∩ global rules)
-Layer 4: optional arg scanning for tools tagged "sensitive"
+Layer 2: argument rules — deterministic parameter constraints
+Layer 3: irreversibility — blast-radius gate, requires human_approved
+Layer 4: tool.tags ⊆ ctx.allowed_tags?             (subagent capability gate)
+Layer 5: intersection policy (subagent ∩ parent ∩ global rules)
+Layer 6: optional arg scanning for tools tagged "sensitive"
 """
 from __future__ import annotations
 
@@ -17,7 +19,12 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from harness.core.errors import PolicyEvaluationError
+from harness.boundaries.argument_policy import check_argument_rules, check_irreversibility
+from harness.core.errors import (
+    ArgumentViolationError,
+    IrreversibleActionError,
+    PolicyEvaluationError,
+)
 from harness.core.events import AuditEvent, now_ms
 from harness.core.types import BoundaryName, Decision, Severity
 from harness.core.verdicts import GateDecision
@@ -80,7 +87,21 @@ async def run(
             audit_tags=agent_config.audit_tags,
         )
 
-    # ── Layer 2: allowed_tags subagent capability gate ────────────────────
+    # ── Layer 2: argument rules ───────────────────────────────────────────
+    try:
+        check_argument_rules(tool, args, ctx)
+    except ArgumentViolationError as e:
+        return await _deny(str(e), name, tool, ctx, emitter, start, tenant_id,
+                           audit_tags=agent_config.audit_tags)
+
+    # ── Layer 3: irreversibility gate ─────────────────────────────────────
+    try:
+        check_irreversibility(tool, ctx)
+    except IrreversibleActionError as e:
+        return await _deny(str(e), name, tool, ctx, emitter, start, tenant_id,
+                           audit_tags=agent_config.audit_tags)
+
+    # ── Layer 4: allowed_tags subagent capability gate ────────────────────
     if ctx.allowed_tags is not None:
         extra_tags = set(tool.tags) - set(ctx.allowed_tags)
         if extra_tags:
@@ -91,7 +112,7 @@ async def run(
                 audit_tags=agent_config.audit_tags,
             )
 
-    # ── Layer 3: intersection policy ──────────────────────────────────────
+    # ── Layer 5: intersection policy ──────────────────────────────────────
     combined_rules = list(effective.policy_rules)
     if ctx.sub_agent_id is not None:
         combined_rules = list(effective.policy_rules) + list(agent_config.policy_rules)
@@ -123,7 +144,7 @@ async def run(
         else args
     )
 
-    # ── Layer 4: optional arg scanning ───────────────────────────────────
+    # ── Layer 6: optional arg scanning ───────────────────────────────────
     if arg_scanners and scan_args_for_tags & set(tool.tags):
         arg_text = "\n".join(f"{k}: {v}" for k, v in effective_args.items())
         scan_results = await asyncio.gather(

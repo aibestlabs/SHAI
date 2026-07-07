@@ -7,9 +7,11 @@ from harness.core.errors import (
     AdapterDiscoveryError,
     AgentConflictError,
     AgentNotRegisteredError,
+    ArgumentViolationError,
     AuditEmissionError,
     ConfigError,
     HarnessError,
+    IrreversibleActionError,
     MCPInvocationError,
     PolicyEvaluationError,
     SubAgentNotDeclaredError,
@@ -19,6 +21,7 @@ from harness.core.harness import SHAI
 from harness.core.types import (
     BoundaryName,
     Decision,
+    Irreversibility,
     ScanAction,
     ScanStatus,
     Severity,
@@ -38,7 +41,7 @@ from harness.core.errors import NetworkPolicyError
 from harness.adapters.scanners.mcp_metadata_scanner import MCPMetadataScanner
 from harness.integrations.base import ShaiTool, shai_tool
 from harness.connectivity.token import DispatchToken, TokenError
-from harness.tools.tool import Tool
+from harness.tools.tool import ArgumentRule, Tool
 
 try:
     __version__ = version("shai")
@@ -51,6 +54,8 @@ __all__ = [
     "__version__",
     # Tools
     "Tool",
+    "ArgumentRule",
+    "Irreversibility",
     "ToolRegistry",
     "ToolSource",
     "LocalSource",
@@ -82,6 +87,8 @@ __all__ = [
     "SubAgentNotDeclaredError",
     "ToolNotRegisteredError",
     "PolicyEvaluationError",
+    "ArgumentViolationError",
+    "IrreversibleActionError",
     "AuditEmissionError",
     "MCPInvocationError",
     # Connectivity

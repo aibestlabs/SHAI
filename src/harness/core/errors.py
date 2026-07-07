@@ -95,3 +95,17 @@ class MCPInvocationError(HarnessError):
             f"code={code} message={message!r}",
             op="mcp_invoke",
         )
+
+
+class ArgumentViolationError(HarnessError):
+    """A tool argument failed a deterministic ArgumentRule check.
+
+    check_tool_call converts this to GateDecision(allowed=False).
+    """
+
+
+class IrreversibleActionError(HarnessError):
+    """A SENSITIVE or IRREVERSIBLE tool was called without human_approved=True.
+
+    check_tool_call converts this to GateDecision(allowed=False).
+    """

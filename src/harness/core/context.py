@@ -27,6 +27,10 @@ class AgentContext(BaseModel, frozen=True):
     allowed_tags:    list[str] | None = None
     conversation_id: str | None = None  # session key for threat accumulator
 
+    # Set to True by the agent after obtaining explicit human confirmation
+    # for the current action. Required by SENSITIVE and IRREVERSIBLE tools.
+    human_approved:  bool = False
+
     @field_validator("agent_id")
     @classmethod
     def _non_empty(cls, v: str) -> str:
@@ -58,5 +62,3 @@ class AgentContext(BaseModel, frozen=True):
             "agent_id":     self.agent_id,
             "sub_agent_id": self.sub_agent_id,
         }
-
-

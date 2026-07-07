@@ -42,13 +42,27 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     # Scan boundaries — list configured scanners
     for boundary_name, boundary_cfg in [
-        ("scan_input",  config.scan_input),
-        ("scan_output", config.scan_output),
+        ("scan_input",       config.scan_input),
+        ("scan_output",      config.scan_output),
+        ("scan_tool_result", config.scan_tool_result),
     ]:
         scanners = [s.name for s in getattr(boundary_cfg, "scanners", [])]
         print(f"  {boundary_name}: enabled={boundary_cfg.enabled}" + (
             f"  scanners={scanners}" if scanners else ""
         ))
+
+    # Execution budget summary
+    budget = config.check_tool_call.execution_budget
+    active = []
+    if budget.max_steps is not None:
+        active.append(f"max_steps={budget.max_steps}")
+    if budget.max_tokens_per_session is not None:
+        active.append(f"max_tokens={budget.max_tokens_per_session}")
+    if budget.max_tool_calls_per_prompt is not None:
+        active.append(f"fan_out={budget.max_tool_calls_per_prompt}")
+    if budget.loop_detection_window > 0:
+        active.append(f"loop_window={budget.loop_detection_window}")
+    print(f"  execution_budget: " + (", ".join(active) if active else "none configured"))
 
     # ── 2. Validate agent files ───────────────────────────────────────────
     agents_dir: Path | None = None
@@ -78,6 +92,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 subs = len(cfg.sub_agents)
                 print(f"OK  (tools={len(cfg.allowed_tool_names)}, sub_agents={subs})")
                 ok += 1
+                # Note tools that have argument rules or irreversibility declared
+                # These are visible in validate output to help operators verify policy
+                # Note: tool metadata (argument_rules, irreversibility) lives on Tool objects
+                # registered separately, not on AgentConfig. Nothing to surface here from YAML.
             except Exception as e:
                 print(f"FAIL\n    Error: {e}", file=sys.stderr)
                 fail += 1

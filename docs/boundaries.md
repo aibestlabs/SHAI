@@ -1,6 +1,6 @@
 # Boundary Reference
 
-Four security boundaries surround every agent turn. Each emits exactly one `AuditEvent` per call regardless of outcome. No raw text in any event field.
+Five security boundaries surround every agent turn. Each emits exactly one `AuditEvent` per call regardless of outcome. No raw text in any event field.
 
 ```
 user text ──► scan_input ──► LLM ──► check_tool_call ──► tool ──► scan_tool_result ──► LLM ──► scan_output ──► response
@@ -15,12 +15,12 @@ Inspects user text before it reaches the LLM. Detects PII, prompt injection, jai
 | Behaviour | Detail |
 |---|---|
 | Disabled | Emits `AuditEvent(disabled=True, decision=allow)`. Returns `ScanVerdict(blocked=False)`. |
-| Normalization | Before scanners run, text is canonicalized into views (surface form + decoded variants). Scanners match against all views. Configured under `normalization:`. |
-| Session pre-check | Before scanners run, the threat accumulator checks whether this session has a risk score ≥ `session.escalation_threshold`. If so, returns immediately with `BLOCK` or `WARN` per `on_escalation` — scanners never run. Audit event carries `extra.signals=["session_escalation"]`. |
-| Scanners | Run concurrently via `asyncio.gather`. Per-scanner exceptions are logged and treated as empty findings — pipeline never raises. |
-| Block threshold | `block_at` severity (default `high`). Any finding at or above blocks. |
-| Redaction | Last scanner's `redacted_text` wins. Use `verdict.redacted_text or original`. |
-| Session post-record | After verdict, the threat accumulator records the turn outcome (status + finding categories) for future cross-turn analysis. |
+| Normalization | Before scanners run, text is canonicalized into views (surface form + decoded variants: base64, hex, URL, rot13, homoglyphs). Scanners match against all views. Catches encoded injection payloads. |
+| Session pre-check | Checks threat accumulator score. If session ≥ `escalation_threshold`, returns immediately with `BLOCK` or `WARN` — scanners never run. Audit event carries `extra.signals=["session_escalation"]`. |
+| Scanners | Run concurrently. Per-scanner exceptions logged as empty findings — pipeline never raises. |
+| Block threshold | `block_at` severity (default `high`). |
+| Redaction | Use `verdict.redacted_text or original`. |
+| Session post-record | After verdict, threat accumulator records turn outcome for future cross-turn analysis. |
 
 **Recommended scanner stack:**
 
@@ -30,7 +30,7 @@ scan_input:
   block_at: high
   scanners:
     - name: injection_scan       # prompt injection, tool coercion, exfiltration
-    - name: jailbreak_scan       # guardrail-integrity: persona override, refusal suppression, etc.
+    - name: jailbreak_scan       # guardrail-integrity: persona override, refusal suppression
     - name: identity_spoof_scan  # agentic identity: claimed orchestrator/system authority
     - name: regex_pii            # PII and credentials (with optional redaction)
 ```
@@ -46,57 +46,117 @@ safe_text = verdict.redacted_text or user_text
 
 ## Tool Governance — `check_tool_call`
 
-The mandatory gate. Cannot be disabled. Four layers in strict order. First deny anywhere wins. Exactly one `AuditEvent` per call.
+The mandatory gate. Cannot be disabled. Six layers in strict order. First deny anywhere wins. Exactly one `AuditEvent` per call.
 
 ### Pre-gate — agent registered?
 
 `AgentRegistry.get(ctx.agent_id)` raises `AgentNotRegisteredError` if the agent was never loaded. Mapped to `GateDecision(allowed=False)`.
 
+### Pre-gate — rate limit and session budget
+
+Rate limiter (R1) and session budget (R2) run before layer checks. See [ARCHITECTURE.md](../ARCHITECTURE.md) for full detail. Both produce structured audit events on denial.
+
 ### L1 — allowed_tool_names
 
-Hard pre-policy gate. `tool_name` must be in `AgentConfig.allowed_tool_names` (or the active `SubAgentConfig.allowed_tool_names`). No policy rule can override this. If the LLM requests a tool not in `allowed_tool_names`, L1 fires before policy runs.
+Hard pre-policy gate. `tool_name` must be in `AgentConfig.allowed_tool_names`. No policy rule can override this.
 
-### L2 — allowed_tags (subagent capability gate)
+### L2 — Argument rules
 
-Active only when `ctx.allowed_tags is not None` (i.e. a subagent call scoped by `scope_context_for_subagent`). Every tag on the tool must be in `allowed_tags`. Prevents subagents from calling tools their parent never granted capability for.
+Deterministic parameter constraints declared on the `Tool`. Evaluated before the policy engine. First violation denies — regardless of what the LLM was told to do, regardless of any injection payload in context.
 
-### L3 — intersection policy
+```python
+Tool(
+    name="approve_payment",
+    tags=["financial"],
+    argument_rules=[
+        ArgumentRule(arg="amount",      max_value=50_000),
+        ArgumentRule(arg="vendor",      allowlist=["acme_corp", "globex"]),
+        ArgumentRule(arg="destination", pattern=r"^https://pay\.internal/"),
+    ],
+)
+```
+
+A payment of $1,200,000 triggered by a malicious webpage the agent read three tool calls ago is blocked here. The injection payload is irrelevant — the argument value failed a closed, deterministic check. This is the correct defense against the ForcedLeak class of attacks.
+
+`ArgumentRule` constraint fields:
+
+| Field | Type | Semantics |
+|---|---|---|
+| `arg` | `str` | Argument name to inspect |
+| `max_value` | `float \| None` | Numeric upper bound (inclusive) |
+| `min_value` | `float \| None` | Numeric lower bound (inclusive) |
+| `allowlist` | `list[str] \| None` | Value must be one of these strings (exact match) |
+| `pattern` | `str \| None` | Value must match this regex (re.search semantics) |
+| `required` | `bool` | Argument must be present and non-None |
+
+Violations produce `deny_reason` of the form: `"argument rule violation on 'approve_payment': argument 'amount' value 1200000 exceeds max 50000"`.
+
+### L3 — Irreversibility gate
+
+Blast-radius classification. Evaluated after argument rules, before the subagent tag gate.
+
+| Tier | Behaviour |
+|---|---|
+| `REVERSIBLE` | Default. No extra check. |
+| `SENSITIVE` | Denied unless `ctx.human_approved=True` |
+| `IRREVERSIBLE` | Denied unless `ctx.human_approved=True` |
+
+```python
+Tool(name="delete_record", tags=["destructive"],
+     irreversibility=Irreversibility.IRREVERSIBLE)
+
+# Agent code — after human confirms:
+ctx_approved = AgentContext(agent_id=ctx.agent_id, human_approved=True)
+gate = await harness.check_tool_call("delete_record", args, ctx_approved)
+```
+
+`human_approved` defaults to `False`. The agent is responsible for setting it after obtaining explicit human confirmation. SHAI enforces the signal's presence — not how confirmation was obtained.
+
+Violations produce `deny_reason` of the form: `"tool 'delete_record' is irreversible and requires human_approved=True on AgentContext"`.
+
+### L4 — allowed_tags (subagent capability gate)
+
+Active only when `ctx.allowed_tags is not None` (i.e. a subagent call). Every tag on the tool must be in `allowed_tags`. Prevents subagents from calling tools their parent never granted capability for.
+
+### L5 — intersection policy
 
 `PolicyEngine.evaluate(tool, args, ctx, rules=combined_rules)`.
 
-`combined_rules` = subagent `policy_rules` + parent `policy_rules`. Engine evaluates these first, then its global rules (`rules_path`). First match wins. Default allow on no match.
+`combined_rules` = subagent `policy_rules` + parent `policy_rules`. First match wins. Default allow on no match.
 
 Policy actions: `allow`, `deny`, `redact`.
 
-### L4 — arg scanning (optional)
+### L6 — arg scanning (optional)
 
-Fires only for tools tagged with any tag in `scan_args_for_tags` (default: `["sensitive"]`). Runs `arg_scanners` on the flattened args string. Any finding at `HIGH` or above denies.
+Fires only for tools tagged with any tag in `scan_args_for_tags` (default: `["sensitive"]`). Any finding at `HIGH` or above denies.
 
 ```python
 gate = await harness.check_tool_call(name, args, ctx)
 if not gate.allowed:
     return f"Denied: {gate.deny_reason}"
 effective_args = gate.redacted_args or args
-result = await dispatch(name, effective_args)
+result = await source.call(name, effective_args)
 ```
 
 ---
 
 ## Tool Stream Control — `scan_tool_result`
 
-Scans tool return values before they re-enter the LLM context. Detects indirect prompt injection embedded in documents, search results, or API responses.
+Scans tool return values before they re-enter the LLM context. **This is the boundary that catches indirect prompt injection** — malicious instructions embedded in documents, search results, emails, or API responses the agent reads.
 
-Uses `patterns_for_doc.yaml` — a 9-rule catalog tuned for document content. No configuration needed; the catalog is bundled.
+The ForcedLeak attack (CVSS 9.4) worked precisely because most frameworks lack this boundary. An instruction embedded in a CRM field was processed as a tool result and executed. Input scanning never sees it.
+
+Uses `patterns_for_doc.yaml` — a 9-rule catalog tuned for document content with lower false-positive rates for structured data.
 
 ```python
 result  = await source.call(tool_name, args)
-verdict = await harness.scan_tool_result(result, ctx)
+verdict = await harness.scan_tool_result(result, ctx, tool_name=tool_name)
 if verdict.blocked:
     return "Tool result blocked — potential injection"
 safe_result = verdict.redacted_text or result
 ```
 
-Disabled by default. Enable in `harness.yaml`:
+Enable in `harness.yaml`:
 
 ```yaml
 scan_tool_result:
@@ -108,11 +168,26 @@ scan_tool_result:
 
 ## Egress Scan — `scan_output`
 
-Identical structure to `scan_input`. Inspects the LLM's final response before it reaches the user. Catches accidental PII egress or data leakage in the response.
+Inspects the LLM's final response before it reaches the user. Catches accidental PII egress and data leakage.
 
 ```python
 verdict = await harness.scan_output(llm_response, ctx)
 return verdict.redacted_text or llm_response
+```
+
+---
+
+## Ingress Scan — `scan_file`
+
+Inspects uploaded files. Structurally identical to `scan_input` — same pipeline, same audit invariants.
+
+`FileScanner` handles: size gate, MIME type verification, PDF JavaScript, EXIF metadata, ZIP/Office macros, and `InjectionScanner` on extracted text.
+
+```yaml
+scan_file:
+  enabled: true
+  block_at: high
+  max_size_mb: 50
 ```
 
 ---
@@ -124,27 +199,7 @@ These hold on every code path, including error and disabled paths:
 - Exactly **one** `AuditEvent` per boundary call
 - `disabled=True` → `decision=allow`, `finding_count=0`
 - `decision=deny` → `deny_reason` is non-null, only on `tool_call_gate`
-- `decision=blocked` → only on scan boundaries (`input_scan`, `output_scan`, `tool_result_scan`, `file_scan`)
+- `decision=blocked` → only on scan boundaries
 - `tenant_id` stamped from `HarnessConfig`, never from the caller
 - No raw user text, LLM output, tool arguments, or scanner-matched substrings in any field
-
----
-
-## Ingress Scan — `scan_file`
-
-Inspects uploaded files. Structurally identical to `scan_input` — same pipeline, same audit invariants.
-
-`FileScanner` is always included automatically and handles: size gate, MIME type verification, PDF JavaScript, EXIF metadata, ZIP/Office macros, and InjectionScanner on extracted text.
-
-```yaml
-scan_file:
-  enabled: true
-  block_at: high
-  max_size_mb: 50
-```
-
-```python
-verdict = await harness.scan_file("/path/to/upload.pdf", ctx)
-if verdict.blocked:
-    return "File rejected"
-```
+- Argument rule violations and irreversibility blocks produce structured `deny_reason` values parseable by SIEM queries
