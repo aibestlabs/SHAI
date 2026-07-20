@@ -33,6 +33,16 @@ CREATE TABLE IF NOT EXISTS patterns (
     version    INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS heuristic_candidates (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint  TEXT NOT NULL,
+    skeleton     TEXT NOT NULL,
+    severity     TEXT NOT NULL,
+    hit_count    INTEGER DEFAULT 1,
+    first_seen   REAL NOT NULL,
+    last_seen    REAL NOT NULL,
+    status       TEXT DEFAULT 'open'
+);
 """
 
 
@@ -166,3 +176,95 @@ def verify_all(db_path: str | Path, secret: bytes) -> tuple[int, int]:
         else:
             invalid += 1
     return valid, invalid
+
+
+# ── Heuristic candidates ─────────────────────────────────────────────────
+
+_LSH_SIMILARITY_THRESHOLD = 0.7
+
+
+def upsert_candidate(
+    db_path: str | Path,
+    fingerprint_json: str,
+    skeleton: str,
+    severity: str,
+    lsh: str,
+) -> None:
+    """Insert or update a heuristic candidate. Deduplicates by LSH similarity."""
+    import time
+    from harness.patterns.fingerprint import fingerprint_from_json, lsh_jaccard
+
+    path = Path(db_path)
+    init_db(path)
+    now = time.time()
+
+    with sqlite3.connect(str(path)) as conn:
+        conn.row_factory = sqlite3.Row
+        # Check existing open/promoted candidates for similarity
+        rows = conn.execute(
+            "SELECT id, fingerprint FROM heuristic_candidates WHERE status IN ('open', 'promoted')"
+        ).fetchall()
+
+        for row in rows:
+            existing_fp = fingerprint_from_json(row["fingerprint"])
+            existing_lsh = existing_fp.get("lsh", "")
+            if lsh_jaccard(lsh, existing_lsh) >= _LSH_SIMILARITY_THRESHOLD:
+                conn.execute(
+                    "UPDATE heuristic_candidates SET hit_count = hit_count + 1, last_seen = ? WHERE id = ?",
+                    (now, row["id"]),
+                )
+                return
+
+        conn.execute(
+            "INSERT INTO heuristic_candidates (fingerprint, skeleton, severity, first_seen, last_seen) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (fingerprint_json, skeleton, severity, now, now),
+        )
+
+
+def load_promoted_candidates(db_path: str | Path) -> list[dict]:
+    """Load all promoted candidates for scan-time lookup."""
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    try:
+        with sqlite3.connect(str(path)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, fingerprint, skeleton, severity, hit_count "
+                "FROM heuristic_candidates WHERE status = 'promoted'"
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def list_candidates(db_path: str | Path, status: str | None = None) -> list[dict]:
+    """List candidates for CLI display."""
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    with sqlite3.connect(str(path)) as conn:
+        conn.row_factory = sqlite3.Row
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM heuristic_candidates WHERE status = ? ORDER BY hit_count DESC",
+                (status,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM heuristic_candidates ORDER BY hit_count DESC"
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_candidate_status(db_path: str | Path, candidate_id: int, status: str) -> bool:
+    """Set candidate status. Returns True if a row was updated."""
+    if status not in ("open", "dismissed", "promoted", "retired"):
+        raise ValueError(f"invalid status: {status}")
+    with sqlite3.connect(str(db_path)) as conn:
+        cursor = conn.execute(
+            "UPDATE heuristic_candidates SET status = ? WHERE id = ?",
+            (status, candidate_id),
+        )
+        return cursor.rowcount > 0

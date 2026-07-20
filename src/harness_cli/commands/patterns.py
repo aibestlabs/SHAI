@@ -51,3 +51,44 @@ def cmd_patterns_verify(args) -> int:
     valid, invalid = verify_all(args.db, secret.encode())
     print(f"valid: {valid}  invalid: {invalid}")
     return 0 if invalid == 0 else 1
+
+
+def cmd_candidates_list(args) -> int:
+    from harness.patterns.store import list_candidates
+    from harness.patterns.fingerprint import fingerprint_from_json
+    import datetime
+
+    candidates = list_candidates(args.db, status=args.status)
+    if not candidates:
+        print("no candidates found")
+        return 0
+
+    for c in candidates:
+        first = datetime.datetime.fromtimestamp(c["first_seen"]).strftime("%b-%d")
+        last = datetime.datetime.fromtimestamp(c["last_seen"]).strftime("%b-%d")
+        print(f"  id={c['id']}  hits={c['hit_count']}  severity={c['severity']}"
+              f"  first={first}  last={last}  status={c['status']}")
+        fp = fingerprint_from_json(c["fingerprint"])
+        markers = ",".join(fp.get("markers", [])) or "none"
+        print(f"    entropy={fp['entropy']}  density={fp['density']}"
+              f"  markers=[{markers}]")
+        print(f"    skeleton: {c['skeleton']}")
+        print()
+    print(f"{len(candidates)} candidates total")
+    return 0
+
+
+def cmd_candidates_update(args) -> int:
+    from harness.patterns.store import set_candidate_status
+    ok = set_candidate_status(args.db, args.id, args.action)
+    if ok:
+        print(f"candidate {args.id} → {args.action}")
+        # Invalidate the in-memory cache so next scan sees the change
+        try:
+            from harness.boundaries._scan import _invalidate_promoted_cache
+            _invalidate_promoted_cache()
+        except Exception:
+            pass
+        return 0
+    print(f"error: candidate {args.id} not found", file=sys.stderr)
+    return 1

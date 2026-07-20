@@ -19,6 +19,7 @@ Load the relevant skill before answering any developer question.
 | `10-connectivity.md` | SHAI Gateway — dispatch tokens, ShaiTransport, NetworkAuditEvent |
 | `11-errors.md` | Exception hierarchy, error handling patterns, common mistakes |
 | `12-testing.md` | Writing tests, `collect_events()`, mocking, test patterns used in the codebase |
+| `13-candidates.md` | Heuristic candidates, fingerprints, skeletons, CLI (candidates, promote, dismiss, retire) |
 
 ## How to use
 

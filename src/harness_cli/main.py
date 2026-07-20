@@ -26,7 +26,10 @@ import sys
 from harness_cli.commands.validate import cmd_validate
 from harness_cli.commands.agents import cmd_agents_list
 from harness_cli.commands.audit import cmd_audit_tail
-from harness_cli.commands.patterns import cmd_patterns_apply, cmd_patterns_list, cmd_patterns_verify
+from harness_cli.commands.patterns import (
+    cmd_patterns_apply, cmd_patterns_list, cmd_patterns_verify,
+    cmd_candidates_list, cmd_candidates_update,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -93,6 +96,23 @@ def build_parser() -> argparse.ArgumentParser:
     verify_p.add_argument("--secret", required=True, metavar="ENV_VAR",
                           help="Environment variable holding the signing secret")
 
+    cand_p = pat_sub.add_parser("candidates", help="List heuristic candidates")
+    cand_p.add_argument("--db", required=True, metavar="PATH")
+    cand_p.add_argument("--status", default=None,
+                        help="Filter by status: open | promoted | dismissed | retired")
+
+    promote_p = pat_sub.add_parser("promote", help="Promote a candidate to read path")
+    promote_p.add_argument("--db", required=True, metavar="PATH")
+    promote_p.add_argument("--id", required=True, type=int)
+
+    dismiss_p = pat_sub.add_parser("dismiss", help="Dismiss a candidate (false positive)")
+    dismiss_p.add_argument("--db", required=True, metavar="PATH")
+    dismiss_p.add_argument("--id", required=True, type=int)
+
+    retire_p = pat_sub.add_parser("retire", help="Retire a promoted candidate")
+    retire_p.add_argument("--db", required=True, metavar="PATH")
+    retire_p.add_argument("--id", required=True, type=int)
+
     return p
 
 
@@ -126,7 +146,18 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_patterns_list(args)
         if args.patterns_command == "verify":
             return cmd_patterns_verify(args)
-        print("shai patterns: specify a subcommand (apply, list, verify)", file=sys.stderr)
+        if args.patterns_command == "candidates":
+            return cmd_candidates_list(args)
+        if args.patterns_command == "promote":
+            args.action = "promoted"
+            return cmd_candidates_update(args)
+        if args.patterns_command == "dismiss":
+            args.action = "dismissed"
+            return cmd_candidates_update(args)
+        if args.patterns_command == "retire":
+            args.action = "retired"
+            return cmd_candidates_update(args)
+        print("shai patterns: specify a subcommand (apply, list, verify, candidates, promote, dismiss, retire)", file=sys.stderr)
         return 1
 
     parser.print_help()

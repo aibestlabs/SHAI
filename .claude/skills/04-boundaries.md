@@ -148,29 +148,6 @@ if verdict.blocked:
 
 ---
 
-## Error handling at scan boundaries (0.2.0)
-
-Scanner failures are handled per the boundary's `on_error` config:
-
-| `on_error` | Scanner failure behavior |
-|---|---|
-| `fail_closed` | Pipeline short-circuits → `ScanVerdict(BLOCK)`. Default. |
-| `fail_open` | Empty findings, pipeline continues (pre-0.2 behavior). |
-| `degrade` | `ScanVerdict(WARN)`, `degraded=True` in audit event. |
-
-A per-scanner circuit breaker tracks consecutive failures. After 5 failures
-the scanner is skipped entirely. After a recovery timeout (exponential
-backoff, cap 5 min), one probe call is attempted. Every scanner failure and
-circuit breaker trip emits a `boundary=system`, `decision=degraded` audit
-event with the scanner name, error, and circuit state.
-
-```yaml
-scan_input:
-  on_error: fail_closed    # scanner crash → block content
-```
-
----
-
 ## Audit invariants (all boundaries)
 
 - **One event per call, always** — even on pre-gate failure or exception.
@@ -195,19 +172,29 @@ scan_input:
 | `RateLimiter` | `harness.adapters.scanners.rate_limiter` | — (config-driven) | `check_tool_call` pre-gate |
 
 **`HeuristicScanner` — always on (0.2.0):**
-Prepended automatically to every scan boundary. Not configurable. Detects
-structural anomalies that regex catalogs miss: high-entropy segments (base64
-blobs, obfuscated payloads), instruction-dense text, abrupt register shifts,
-and embedded LLM markup (`<|system|>`, `[INST]`, `{"role": "system"}`).
-Four sub-scores (0–2 each), summed: ≥5 HIGH, ≥3 MEDIUM, ≥1 LOW.
+Prepended automatically to every scan boundary. Detects structural
+anomalies: high-entropy segments, instruction-dense text, register shifts,
+and embedded LLM markup. Four sub-scores (0–2 each), summed: ≥5 HIGH,
+≥3 MEDIUM, ≥1 LOW.
 
 **Ensemble severity promotion (0.2.0):**
-After all scanners complete, findings are cross-checked. When 2+ different
-scanners flag the same category and their combined severity weight crosses
-a threshold, all findings in that category are promoted to HIGH. This means
-a MEDIUM from `injection_scan` plus a MEDIUM from `heuristic_scan` for the
-same category becomes HIGH — even though neither scanner alone would have
-triggered a block at `block_at: high`. Always on, no configuration.
+After all scanners complete, findings from 2+ different scanners for the
+same category are combined. When their total severity weight crosses a
+threshold, all findings in that category are promoted to HIGH.
+
+**Heuristic candidates (0.2.0):**
+When the heuristic scanner fires MEDIUM+ and no regex scanner caught
+anything, the system records a candidate with a structural fingerprint
+and skeleton. Engineers review via `shai patterns candidates`, promote
+real patterns into the scan read path, and eventually graduate them to
+permanent regex rules.
+→ See `13-candidates.md` for the full candidate lifecycle and CLI.
+
+**Error handling (0.2.0):**
+Per-boundary `on_error` controls scanner failure behavior: `fail_closed`
+(default, BLOCK), `fail_open` (empty findings), `degrade` (WARN). A
+per-scanner circuit breaker prevents repeated calls to broken adapters.
+Failures emit `boundary=system`, `decision=degraded` audit events.
 
 **`injection_patterns.yaml` vs `patterns_for_doc.yaml`:**
 - `injection_patterns.yaml` — tuned for user text input. More sensitive, 17 rules.

@@ -378,6 +378,9 @@ async def run_scan(
             # caller wants to log the redacted form for debugging).
             current_text = result.redacted_text
 
+    # ── Promoted candidates: inject findings from human-promoted heuristic matches ──
+    all_findings = _check_promoted_candidates(text, all_findings)
+
     # ── Ensemble: promote severity when 2+ scanners agree on a category ────
     from harness.boundaries.ensemble import promote_findings
     all_findings = promote_findings(all_findings)
@@ -436,11 +439,122 @@ async def run_scan(
     )
     await emitter.emit(event)
 
+    # ── Candidate write: record unmatched heuristic detections ────────────
+    _record_candidate_if_needed(text, all_findings, adapter_names)
+
     return ScanVerdict(
         status=final_status,
         findings=all_findings,
         redacted_text=redacted_text,
     )
+
+
+# ── Heuristic candidate helpers ──────────────────────────────────────────
+
+_DEFAULT_CANDIDATES_DB = "state/patterns.db"
+
+# In-memory cache of promoted candidates — refreshed on first scan and
+# when CLI changes status. Avoids DB reads on every scan call.
+_promoted_cache: list[dict] | None = None
+
+
+def _invalidate_promoted_cache() -> None:
+    """Called by CLI after promote/retire/dismiss."""
+    global _promoted_cache
+    _promoted_cache = None
+
+
+def _get_promoted() -> list[dict]:
+    global _promoted_cache
+    if _promoted_cache is None:
+        from harness.patterns.store import load_promoted_candidates
+        _promoted_cache = load_promoted_candidates(_DEFAULT_CANDIDATES_DB)
+    return _promoted_cache
+
+
+def _check_promoted_candidates(text: str, findings: list[Finding]) -> list[Finding]:
+    """Read path: inject findings from promoted candidates that match the current text."""
+    promoted = _get_promoted()
+    if not promoted:
+        return findings
+
+    from harness.patterns.fingerprint import (
+        extract_fingerprint, lsh_jaccard, fingerprint_from_json,
+    )
+    # Compute a quick fingerprint of the current text (sub-scores not available
+    # here, so use 0.0 — the LSH is what matters for matching)
+    current_fp = extract_fingerprint(text, 0.0, 0.0, 0.0, 0.0)
+    current_lsh = current_fp["lsh"]
+
+    injected = list(findings)
+    for candidate in promoted:
+        stored_fp = fingerprint_from_json(candidate["fingerprint"])
+        stored_lsh = stored_fp.get("lsh", "")
+        if lsh_jaccard(current_lsh, stored_lsh) >= 0.7:
+            injected.append(Finding(
+                scanner="learned_candidate",
+                category="heuristic_anomaly",
+                severity=Severity.MEDIUM,
+                detail=f"promoted candidate id={candidate['id']} hits={candidate['hit_count']}",
+            ))
+            break  # one match is enough
+    return injected
+
+
+_REGEX_SCANNERS = {"injection_scan", "jailbreak_scan", "identity_spoof_scan"}
+
+
+def _record_candidate_if_needed(
+    text: str,
+    findings: list[Finding],
+    adapter_names: list[str],
+) -> None:
+    """Write path: record unmatched heuristic detections as candidates.
+
+    Fires when heuristic_scan produced MEDIUM+ and no regex scanner
+    produced a finding in the same call. Fire-and-forget — errors swallowed.
+    """
+    heuristic_findings = [
+        f for f in findings
+        if f.scanner == "heuristic_scan" and f.severity >= Severity.MEDIUM
+    ]
+    if not heuristic_findings:
+        return
+
+    regex_findings = [f for f in findings if f.scanner in _REGEX_SCANNERS]
+    if regex_findings:
+        return  # regex scanners caught it — no gap
+
+    try:
+        from harness.patterns.fingerprint import (
+            extract_fingerprint, extract_skeleton, fingerprint_to_json,
+        )
+        from harness.patterns.store import upsert_candidate
+
+        # Parse sub-scores from the heuristic detail string
+        detail = heuristic_findings[0].detail or ""
+        scores = {"entropy": 0.0, "density": 0.0, "coherence": 0.0, "structural": 0.0}
+        for part in detail.split("(")[-1].rstrip(")").split(","):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                if k.strip() in scores:
+                    scores[k.strip()] = float(v.strip())
+
+        fp = extract_fingerprint(
+            text, scores["entropy"], scores["density"],
+            scores["coherence"], scores["structural"],
+        )
+        skeleton = extract_skeleton(text)
+        upsert_candidate(
+            _DEFAULT_CANDIDATES_DB,
+            fingerprint_to_json(fp),
+            skeleton,
+            heuristic_findings[0].severity.value,
+            fp["lsh"],
+        )
+    except Exception as e:
+        log.debug("candidate recording failed: %s", e)
 
 
 async def run_file_scan(
