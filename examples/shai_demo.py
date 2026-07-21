@@ -70,11 +70,13 @@ def print_attempt(what: str) -> None:
     print(f"{label} {what}")
 
 def print_shai_row(boundary: str, decision: str, detail: str = "") -> None:
-    icons   = {"allow": c(GREEN, "✓ ALLOW  "), "deny":    c(RED,   "✗ DENY   "),
-               "blocked": c(RED, "✗ BLOCK  "), "redact":  c(YELLOW,"~ REDACT ")}
+    icons   = {"allow": c(GREEN, "✓ ALLOW  "), "deny":     c(RED,   "✗ DENY   "),
+               "blocked": c(RED, "✗ BLOCK  "), "redact":   c(YELLOW,"~ REDACT "),
+               "warn":  c(YELLOW,"⚠ WARN   "), "degraded": c(YELLOW,"◐ DEGRADE")}
     labels  = {"input_scan": "scan_input      ", "tool_call_gate": "check_tool_call ",
                "tool_result_scan": "scan_tool_result", "output_scan": "scan_output     ",
-               "file_scan": "scan_file       "}
+               "file_scan": "scan_file       ", "mcp_metadata_scan": "scan_mcp_meta   ",
+               "system":    "system          "}
     icon    = icons.get(decision, c(DIM, f"? {decision:<7}"))
     blabel  = c(DIM, labels.get(boundary, pad(boundary, 16)))
     dtext   = f"  {c(DIM, detail)}" if detail else ""
@@ -299,7 +301,7 @@ async def s08_pii_in_args(h: SHAI, ctx: AgentContext) -> bool:
     print_scenario_header(8, "PII in tool arguments (arg scanner)", "T11 Sensitive Data Exposure")
     args = {
         "path": "/reports/output.txt",
-        "content": "Customer record: SSN 987-65-4321, card 4111 1111 1111 1111",
+        "content": "Customer record: SSN 123-45-6789, card 4111 1111 1111 1111",
     }
     print_attempt(
         f'{c(CYAN, "write_file")} called with SSN + credit card in content arg  '

@@ -118,7 +118,7 @@ async def main() -> None:
 
         _header("7. Output PII redacted")
         _show("scan_output", await harness.scan_output(
-            "Contact alice@corp.com, SSN 987-65-4321.", ctx))
+            "Contact alice@corp.com, SSN 123-45-6789.", ctx))
 
     _header("AUDIT TRAIL")
     for i, ev in enumerate(events, 1):

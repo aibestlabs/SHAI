@@ -46,12 +46,16 @@ def print_attempt(what: str) -> None:
     print(f"{c(BLUE, '  Agent attempts:')} {what}")
 
 def print_shai_row(boundary: str, decision: str, detail: str = "") -> None:
-    icons  = {"allow":   c(GREEN,  "✓ ALLOW  "),
-               "deny":    c(RED,    "✗ DENY   "),
-               "blocked": c(RED,    "✗ BLOCK  "),
-               "warn":    c(YELLOW, "⚠ WARN   ")}
+    icons  = {"allow":    c(GREEN,  "✓ ALLOW  "),
+               "deny":     c(RED,    "✗ DENY   "),
+               "blocked":  c(RED,    "✗ BLOCK  "),
+               "warn":     c(YELLOW, "⚠ WARN   "),
+               "redact":   c(YELLOW, "~ REDACT "),
+               "degraded": c(YELLOW, "◐ DEGRADE")}
     labels = {"input_scan": "scan_input      ", "tool_call_gate": "check_tool_call ",
-               "tool_result_scan": "scan_tool_result", "output_scan": "scan_output     "}
+               "tool_result_scan": "scan_tool_result", "output_scan": "scan_output     ",
+               "file_scan": "scan_file       ", "mcp_metadata_scan": "scan_mcp_meta   ",
+               "system":    "system          "}
     icon   = icons.get(decision, c(DIM, f"? {decision:<7}"))
     blabel = c(DIM, labels.get(boundary, pad(boundary, 16)))
     dtext  = f"  {c(DIM, detail)}" if detail else ""

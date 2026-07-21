@@ -97,15 +97,18 @@ def print_blocked(stage: str, detail: str = "") -> None:
 # ── Audit summary ──────────────────────────────────────────────────────────
 
 _BOUNDARY_LABELS = {
-    "input_scan":       "Input scan      ",
-    "tool_call_gate":   "Tool gate       ",
-    "tool_result_scan": "Tool result scan",
-    "output_scan":      "Output scan     ",
+    "input_scan":        "Input scan       ",
+    "tool_call_gate":    "Tool gate        ",
+    "tool_result_scan":  "Tool result scan ",
+    "output_scan":       "Output scan      ",
+    "file_scan":         "File scan        ",
+    "mcp_metadata_scan": "MCP metadata scan",
+    "system":            "System / degrade ",
 }
-_DECISION_COLS  = {"allow": GREEN, "deny": RED, "blocked": RED,
-                   "warn": YELLOW, "redact": YELLOW}
-_DECISION_ICONS = {"allow": "✓", "deny": "✗", "blocked": "✗",
-                   "warn": "⚠", "redact": "~"}
+_DECISION_COLS  = {"allow":    GREEN,  "deny":     RED,     "blocked": RED,
+                   "warn":     YELLOW, "redact":   YELLOW,  "degraded": YELLOW}
+_DECISION_ICONS = {"allow":    "✓",    "deny":     "✗",     "blocked": "✗",
+                   "warn":     "⚠",    "redact":   "~",     "degraded": "◐"}
 
 
 def print_audit_summary(events: list) -> None:
