@@ -15,10 +15,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, PrivateAttr, field_validator
 
 if TYPE_CHECKING:
-    pass
+    from harness.core.turn_signals import TurnSignals
 
 
 class AgentContext(BaseModel, frozen=True):
@@ -30,6 +30,11 @@ class AgentContext(BaseModel, frozen=True):
     # Set to True by the agent after obtaining explicit human confirmation
     # for the current action. Required by SENSITIVE and IRREVERSIBLE tools.
     human_approved:  bool = False
+
+    # Per-turn signal bus. Mutable — stored as PrivateAttr because Pydantic
+    # frozen models block public-field writes. Attached by SHAI.scan_input
+    # at turn start, cleared by SHAI.scan_output at turn end.
+    _turn_signals: "TurnSignals | None" = PrivateAttr(default=None)
 
     @field_validator("agent_id")
     @classmethod
@@ -49,6 +54,9 @@ class AgentContext(BaseModel, frozen=True):
           - agent_id preserved (identifies the parent)
           - sub_agent_id set
           - allowed_tags narrowed to the subagent's declared tags
+
+        Note: turn_signals is NOT propagated to subagents. Subagent invocations
+        are separate turns from the parent's perspective.
         """
         return AgentContext(
             agent_id=self.agent_id,
@@ -62,3 +70,18 @@ class AgentContext(BaseModel, frozen=True):
             "agent_id":     self.agent_id,
             "sub_agent_id": self.sub_agent_id,
         }
+
+    # ── TurnSignals accessors ──────────────────────────────────────────
+
+    @property
+    def turn_signals(self) -> "TurnSignals | None":
+        """Current turn's signal bus, or None if not in a turn."""
+        return self._turn_signals
+
+    def _attach_signals(self, signals: "TurnSignals") -> None:
+        """Attach a fresh TurnSignals. Called by SHAI.scan_input at turn start."""
+        self._turn_signals = signals
+
+    def _clear_signals(self) -> None:
+        """Clear the signal bus. Called by SHAI.scan_output at turn end."""
+        self._turn_signals = None

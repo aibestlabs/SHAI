@@ -29,6 +29,7 @@ from harness.adapters.secrets.env import EnvVarProvider
 from harness.config.schema import HarnessConfig
 from harness.core.context import AgentContext
 
+from harness.core.turn_signals import RISK_HIGH, TurnSignals
 from harness.core.verdicts import GateDecision, ScanVerdict
 from harness.policy.rules import RuleBasedPolicy
 from harness.tools.tool import Tool
@@ -478,6 +479,10 @@ class SHAI:
     async def scan_input(self, text: str, ctx: AgentContext) -> ScanVerdict:
         session_id = ctx.conversation_id or ctx.agent_id
 
+        # Attach fresh TurnSignals at turn start. scan_input is always the
+        # first boundary in a turn; downstream boundaries read/write this.
+        ctx._attach_signals(TurnSignals())
+
         # Accumulator pre-check: escalated sessions blocked before scanners run.
         if self._threat_accumulator is not None:
             escalated, reason = await self._threat_accumulator.check(session_id)
@@ -497,6 +502,8 @@ class SHAI:
                     extra={"signals": ["session_escalation"]},
                 )
                 await self._emitter.emit(event)
+                # Session-escalation short-circuit: clear signals, no downstream boundaries
+                ctx._clear_signals()
                 return ScanVerdict(status=status)
 
         verdict = await run_scan(
@@ -514,13 +521,23 @@ class SHAI:
             audit_tags=self._audit_tags_for(ctx),
         )
 
-        # Accumulator post-record: update session state with this turn's outcome.
-        if self._threat_accumulator is not None:
-            categories = [f.category for f in verdict.findings]
-            density = _extract_density(verdict)
-            await self._threat_accumulator.record(
-                session_id, text, verdict.status.value, categories, density=density
-            )
+        # Record signals from the input scan
+        ctx.turn_signals.record_input(verdict, self._input_scanners)
+
+        # Accumulator record moved to scan_output — needs full turn context
+        # for consolidated turn_risk. scan_input BLOCK short-circuits still
+        # need to record; do that here for BLOCK only.
+        if verdict.status == ScanStatus.BLOCK:
+            if self._threat_accumulator is not None:
+                categories = [f.category for f in verdict.findings]
+                density = _extract_density(verdict)
+                turn_risk = ctx.turn_signals.compute_risk()
+                await self._threat_accumulator.record(
+                    session_id, text, verdict.status.value, categories,
+                    density=density, turn_risk=turn_risk,
+                )
+            # Turn ends here — clear signals
+            ctx._clear_signals()
 
         return verdict
 
@@ -601,6 +618,8 @@ class SHAI:
                     audit_tags=self._audit_tags_for(ctx),
                 )
                 await self._emitter.emit(event)
+                if ctx.turn_signals is not None:
+                    ctx.turn_signals.record_gate(False, name)
                 return GateDecision(allowed=False, deny_reason=reason)
 
         # R2: session execution budget check
@@ -626,6 +645,8 @@ class SHAI:
                     audit_tags=self._audit_tags_for(ctx),
                 )
                 await self._emitter.emit(event)
+                if ctx.turn_signals is not None:
+                    ctx.turn_signals.record_gate(False, name)
                 return GateDecision(allowed=False, deny_reason=reason)
 
         # Pre-gate: agent must be registered — deny with audit event on miss
@@ -645,6 +666,8 @@ class SHAI:
                 audit_tags={},
             )
             await self._emitter.emit(event)
+            if ctx.turn_signals is not None:
+                ctx.turn_signals.record_gate(False, name)
             return GateDecision(allowed=False, deny_reason=reason)
 
         # Composite tool identity: (source_name, Tool) tuple
@@ -663,7 +686,14 @@ class SHAI:
             emitter=self._emitter,
             tenant_id=self._tenant_id,
             scan_args_for_tags=self._scan_args_for_tags,
+            turn_signals=ctx.turn_signals,
         )
+
+        # Record gate outcome to TurnSignals for downstream boundaries
+        if ctx.turn_signals is not None:
+            tool_obj = tools.get(name)
+            tool_tags = frozenset(tool_obj.tags) if tool_obj else frozenset()
+            ctx.turn_signals.record_gate(gate.allowed, name, tool_tags)
 
         # Issue dispatch token when gate allows and connectivity is enabled
         if gate.allowed and self._connectivity.enabled and self._connectivity_secret:
@@ -783,7 +813,7 @@ class SHAI:
             await self._emitter.emit(event)
             return ScanVerdict(status=ScanStatus.ALLOW)
 
-        return await run_tool_result_scan(
+        verdict = await run_tool_result_scan(
             result, ctx,
             scanners=self._tool_result_scanners,
             scanner_actions=[],   # tool_result uses boundary_action only
@@ -797,8 +827,16 @@ class SHAI:
             audit_tags=self._audit_tags_for(ctx),
         )
 
+        # Record signals from the tool result scan
+        if ctx.turn_signals is not None:
+            ctx.turn_signals.record_tool_result(verdict)
+
+        return verdict
+
     async def scan_output(self, text: str, ctx: AgentContext) -> ScanVerdict:
-        return await run_scan(
+        session_id = ctx.conversation_id or ctx.agent_id
+
+        verdict = await run_scan(
             text, ctx,
             boundary=BoundaryName.OUTPUT_SCAN,
             scanners=self._output_scanners,
@@ -812,6 +850,59 @@ class SHAI:
             normalization=self._config.normalization,
             audit_tags=self._audit_tags_for(ctx),
         )
+
+        # Option A: consolidated risk-based block. Even if no individual
+        # scanner blocked, if the accumulated turn risk crosses RISK_HIGH,
+        # block at scan_output — the last boundary with the full picture.
+        turn_risk = 0.0
+        if ctx.turn_signals is not None:
+            turn_risk = ctx.turn_signals.compute_risk()
+            if turn_risk >= RISK_HIGH and verdict.status != ScanStatus.BLOCK:
+                verdict = await self._emit_risk_block(ctx, turn_risk)
+
+        # Accumulator record — moved from scan_input to scan_output so the
+        # session score reflects the full-turn consolidated risk, not just
+        # the input scan verdict.
+        if self._threat_accumulator is not None:
+            categories = [f.category for f in verdict.findings]
+            density = _extract_density(verdict)
+            await self._threat_accumulator.record(
+                session_id, text, verdict.status.value, categories,
+                density=density, turn_risk=turn_risk,
+            )
+
+        # Clear the turn signal bus — the turn ends here
+        ctx._clear_signals()
+
+        return verdict
+
+    async def _emit_risk_block(
+        self, ctx: AgentContext, turn_risk: float
+    ) -> ScanVerdict:
+        """Emit an audit event for a consolidated-risk block. Called by
+        scan_output when compute_risk() crosses RISK_HIGH.
+        """
+        from harness.core.events import AuditEvent
+
+        deny_reason = (
+            f"consolidated turn risk {turn_risk:.2f} exceeds high threshold "
+            f"({RISK_HIGH:.2f})"
+        )
+        event = AuditEvent.build(
+            boundary=BoundaryName.OUTPUT_SCAN,
+            decision=Decision.BLOCKED,
+            ctx=ctx,
+            tenant_id=self._tenant_id,
+            duration_ms=0,
+            deny_reason=deny_reason,
+            audit_tags=self._audit_tags_for(ctx),
+            extra={
+                "turn_risk":     round(turn_risk, 4),
+                "signal_source": "consolidated",
+            },
+        )
+        await self._emitter.emit(event)
+        return ScanVerdict(status=ScanStatus.BLOCK)
 
 
     @property

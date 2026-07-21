@@ -101,6 +101,7 @@ class RegexPIIScanner:
     """Reference PII scanner using compiled regex patterns."""
 
     name = "regex_pii"
+    method_family = "regex_pii"
 
     def __init__(self, categories: list[str] | None = None) -> None:
         """

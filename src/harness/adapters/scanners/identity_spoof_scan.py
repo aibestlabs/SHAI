@@ -44,6 +44,7 @@ class IdentitySpoofScanner(InjectionScanner):
     """
 
     name = "identity_spoof_scan"
+    method_family = "regex_catalog"
 
     def __init__(
         self,

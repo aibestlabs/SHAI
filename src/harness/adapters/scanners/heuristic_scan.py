@@ -106,6 +106,7 @@ class HeuristicScanner:
     """Structural anomaly scanner. Always on. Satisfies Scanner Protocol."""
 
     name = "heuristic_scan"
+    method_family = "structural_heuristic"
 
     async def scan(self, text: str, ctx: AgentContext) -> ScanResult:
         if not text or not text.strip():

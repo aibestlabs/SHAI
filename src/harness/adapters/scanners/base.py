@@ -23,6 +23,8 @@ class Scanner(Protocol):
     """Inspect text and return findings. All async — production scanners are network-bound."""
 
     name: str
+    method_family: str   # detection technique — used by TurnSignals for corroboration
+                         # (regex_catalog | structural_heuristic | regex_pii | ml_classifier | unknown)
 
     async def scan(
         self,

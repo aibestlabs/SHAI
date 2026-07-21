@@ -38,6 +38,7 @@ class JailbreakScanner(InjectionScanner):
     """
 
     name = "jailbreak_scan"
+    method_family = "regex_catalog"
 
     def __init__(
         self,

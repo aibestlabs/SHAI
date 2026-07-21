@@ -264,6 +264,7 @@ class InjectionScanner:
     """
 
     name = "injection_scan"
+    method_family = "regex_catalog"
 
     def __init__(
         self,

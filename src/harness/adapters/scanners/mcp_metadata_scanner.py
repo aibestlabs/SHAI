@@ -59,6 +59,7 @@ class MCPMetadataScanner:
     """
 
     name = "mcp_metadata_scan"
+    method_family = "regex_catalog"
 
     def __init__(
         self,

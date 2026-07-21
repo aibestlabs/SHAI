@@ -616,7 +616,20 @@ async def run_tool_result_scan(
     audit_tags: dict[str, str] | None = None,
     on_error: OnError = OnError.FAIL_CLOSED,
 ) -> ScanVerdict:
-    """Scan a tool return value. Delegates to run_scan with TOOL_RESULT_SCAN."""
+    """Scan a tool return value. Delegates to run_scan with TOOL_RESULT_SCAN.
+
+    Adjusts block_at down one severity level when TurnSignals shows the input
+    scan flagged injection and the gate allowed a specific tool — the tool
+    result now has elevated scrutiny because we know an attack chain is in
+    progress.
+    """
+    effective_block_at = block_at
+    signals = ctx.turn_signals
+    if (signals is not None
+            and signals.input_has_injection
+            and signals.gate_tool_name is not None):
+        effective_block_at = _one_lower(block_at)
+
     return await run_scan(
         result,
         ctx,
@@ -628,8 +641,18 @@ async def run_tool_result_scan(
         emitter=emitter,
         tenant_id=tenant_id,
         enabled=enabled,
-        block_at=block_at,
+        block_at=effective_block_at,
         normalization=normalization,
         audit_tags=audit_tags,
         on_error=on_error,
     )
+
+
+def _one_lower(sev: Severity) -> Severity:
+    """Return the next-lower severity level, floored at LOW."""
+    ladder = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
+    try:
+        idx = ladder.index(sev)
+    except ValueError:
+        return sev
+    return ladder[max(0, idx - 1)]

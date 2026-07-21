@@ -1,6 +1,6 @@
 """check_tool_call — the mandatory tool-call gate.
 
-Five layers, strict order. Exactly one AuditEvent per call.
+Six layers, strict order. Exactly one AuditEvent per call.
 Never dispatches the tool — gates only.
 
 Receives pre-resolved AgentConfig and tools dict from the Harness instance.
@@ -11,7 +11,9 @@ Layer 2: argument rules — deterministic parameter constraints
 Layer 3: irreversibility — blast-radius gate, requires human_approved
 Layer 4: tool.tags ⊆ ctx.allowed_tags?             (subagent capability gate)
 Layer 5: intersection policy (subagent ∩ parent ∩ global rules)
-Layer 6: optional arg scanning for tools tagged "sensitive"
+Layer 6: signal correlation — deny high-risk tools when input scan flagged
+         injection; mark WARN+write-capable calls for tightened arg scanning
+Layer 7: optional arg scanning (unconditional if layer 6 marked TIGHTEN)
 """
 from __future__ import annotations
 
@@ -26,7 +28,7 @@ from harness.core.errors import (
     PolicyEvaluationError,
 )
 from harness.core.events import AuditEvent, now_ms
-from harness.core.types import BoundaryName, Decision, Severity
+from harness.core.types import BoundaryName, Decision, ScanStatus, Severity
 from harness.core.verdicts import GateDecision
 
 if TYPE_CHECKING:
@@ -34,10 +36,18 @@ if TYPE_CHECKING:
     from harness.agents.agent_config import AgentConfig, SubAgentConfig
     from harness.audit.emitter import AuditEmitter
     from harness.core.context import AgentContext
+    from harness.core.turn_signals import TurnSignals
     from harness.policy.engine import PolicyEngine
     from harness.tools.tool import Tool
 
 log = logging.getLogger(__name__)
+
+# Sentinel returned by _check_signal_correlation when the input scan warned
+# and the target tool is write-capable. Causes layer 7 to run arg scanning
+# unconditionally, regardless of the tool's `sensitive` tag.
+_TIGHTEN_MARKER = object()
+
+_HIGH_RISK_TAGS = frozenset({"destructive", "financial", "external"})
 
 
 async def run(
@@ -52,11 +62,14 @@ async def run(
     emitter: AuditEmitter,
     tenant_id: str,
     scan_args_for_tags: frozenset[str] = frozenset({"sensitive"}),
+    turn_signals: TurnSignals | None = None,
 ) -> GateDecision:
     """Gate one tool call.
 
     agent_config: pre-resolved AgentConfig from the harness (not looked up here).
     tools:        pre-resolved {name: Tool} for this agent (not looked up here).
+    turn_signals: cross-boundary signal bus. When present, layer 6 correlates
+                  earlier boundary findings against the proposed tool call.
     """
     start = now_ms()
 
@@ -144,8 +157,26 @@ async def run(
         else args
     )
 
-    # ── Layer 6: optional arg scanning ───────────────────────────────────
-    if arg_scanners and scan_args_for_tags & set(tool.tags):
+    # ── Layer 6: signal correlation ──────────────────────────────────────
+    # Reads TurnSignals recorded by earlier boundaries. Either denies (Pattern A:
+    # injection + high-risk tool) or marks the call for tightened arg scanning
+    # (Pattern B: WARN + write-capable tool). No effect when signals absent.
+    correlation = _check_signal_correlation(tool, turn_signals)
+    if isinstance(correlation, GateDecision):
+        # Pattern A denial — emit and return
+        return await _deny(
+            correlation.deny_reason or "signal correlation denial",
+            name, tool, ctx, emitter, start, tenant_id,
+            audit_tags=agent_config.audit_tags,
+        )
+    tighten_arg_scan = correlation is _TIGHTEN_MARKER
+
+    # ── Layer 7: optional arg scanning ───────────────────────────────────
+    # Runs when tool has a scan_args_for_tags tag OR when layer 6 tightened.
+    should_scan_args = bool(arg_scanners) and (
+        bool(scan_args_for_tags & set(tool.tags)) or tighten_arg_scan
+    )
+    if should_scan_args:
         arg_text = "\n".join(f"{k}: {v}" for k, v in effective_args.items())
         scan_results = await asyncio.gather(
             *[scanner.scan(arg_text, ctx) for scanner in arg_scanners],
@@ -208,3 +239,38 @@ async def _deny(
     )
     await emitter.emit(event)
     return GateDecision(allowed=False, deny_reason=reason)
+
+
+def _check_signal_correlation(
+    tool: Tool,
+    signals: TurnSignals | None,
+) -> GateDecision | object | None:
+    """Layer 6: correlate proposed tool call against earlier boundary signals.
+
+    Returns:
+      GateDecision(allowed=False, ...) — Pattern A deny: injection input + high-risk tool
+      _TIGHTEN_MARKER                  — Pattern B tighten: WARN input + write-capable tool
+      None                             — no signals or nothing to correlate
+    """
+    if signals is None or signals.input_verdict is None:
+        return None
+
+    tool_tags = set(tool.tags)
+
+    # Pattern A: injection input + high-risk tool → deny
+    if signals.input_has_injection:
+        risky_overlap = tool_tags & _HIGH_RISK_TAGS
+        if risky_overlap:
+            return GateDecision(
+                allowed=False,
+                deny_reason=(
+                    f"correlated with input injection signal — "
+                    f"tool has high-risk tag(s): {sorted(risky_overlap)}"
+                ),
+            )
+
+    # Pattern B: input WARN + write-capable tool → tighten scrutiny
+    if signals.input_verdict == ScanStatus.WARN and "read" not in tool_tags:
+        return _TIGHTEN_MARKER
+
+    return None

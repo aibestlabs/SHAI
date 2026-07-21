@@ -67,6 +67,9 @@ WEIGHT_BLOCK   = 0.60
 WEIGHT_WARN    = 0.25
 WEIGHT_REFRAME = 0.30
 WEIGHT_DENSITY = 0.25
+# When a turn's consolidated risk crosses RISK_HIGH, treat it as if it were
+# a BLOCK for cross-turn accumulation, even if no individual boundary blocked.
+WEIGHT_TURN_RISK_HIGH = 0.35
 
 # ── DDL ───────────────────────────────────────────────────────────────────
 
@@ -86,6 +89,7 @@ CREATE TABLE IF NOT EXISTS turns (
     categories  TEXT    NOT NULL DEFAULT '[]',
     turn_index  INTEGER NOT NULL DEFAULT 0,
     density     REAL    NOT NULL DEFAULT 0.0,
+    turn_risk   REAL    NOT NULL DEFAULT 0.0,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, turn_index);
@@ -200,15 +204,18 @@ class ThreatAccumulator:
         status: str,             # ScanStatus value: "allow" | "warn" | "block"
         categories: list[str],   # finding categories from this turn
         density: float = 0.0,    # instruction density score from heuristic scanner
+        turn_risk: float = 0.0,  # consolidated cross-boundary risk from TurnSignals
     ) -> None:
-        """Write turn, recompute score, persist. Called AFTER run_scan.
+        """Write turn, recompute score, persist. Called AFTER scan_output
+        (or scan_input if the turn short-circuited at input BLOCK).
 
         Holds the per-session lock for the duration so concurrent turns
         on the same session cannot interleave writes.
         """
         lock = await self._session_lock(session_id)
         async with lock:
-            await self._record_locked(session_id, text, status, categories, density)
+            await self._record_locked(session_id, text, status, categories,
+                                      density, turn_risk)
 
     async def reset(self, session_id: str) -> None:
         """Clear all state for a session. Call on session end."""
@@ -226,6 +233,7 @@ class ThreatAccumulator:
         status: str,
         categories: list[str],
         density: float = 0.0,
+        turn_risk: float = 0.0,
     ) -> None:
         db   = await self._conn()
         now  = time.time()
@@ -247,13 +255,14 @@ class ThreatAccumulator:
         turn_idx = row[0]
 
         await db.execute(
-            "INSERT INTO turns(session_id, ts, text_hash, bigram_json, status, categories, turn_index, density) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-            (session_id, now, h, bgrams, status, cats, turn_idx, density),
+            "INSERT INTO turns(session_id, ts, text_hash, bigram_json, status, "
+            "categories, turn_index, density, turn_risk) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, now, h, bgrams, status, cats, turn_idx, density, turn_risk),
         )
 
         async with db.execute(
-            "SELECT text_hash, bigram_json, status, density FROM turns "
+            "SELECT text_hash, bigram_json, status, density, turn_risk FROM turns "
             "WHERE session_id = ? ORDER BY turn_index DESC LIMIT ?",
             (session_id, self._window),
         ) as cur:
@@ -274,20 +283,36 @@ class ThreatAccumulator:
 
     def _compute_score(
         self,
-        window: list,       # rows: (text_hash, bigram_json, status, density), newest first
+        window: list,       # rows: (text_hash, bigram_json, status, density, turn_risk), newest first
         sim_threshold: float,
         density_threshold: float = 0.05,
     ) -> float:
         if not window:
             return 0.0
 
+        # Import RISK_HIGH lazily to avoid circular import — turn_signals
+        # imports from core.types, which is loaded before this module.
+        from harness.core.turn_signals import RISK_HIGH
+
         n          = len(window)
         block_n    = sum(1 for r in window if r["status"] == "block")
+        # Rows with high consolidated turn_risk are treated as effective blocks
+        # for rate calculation even if the individual scanner status was allow/warn
+        effective_block_n = sum(
+            1 for r in window
+            if r["status"] == "block" or r["turn_risk"] >= RISK_HIGH
+        )
         warn_n     = sum(1 for r in window if r["status"] in ("warn", "block"))
-        block_rate = block_n / n
+        block_rate = max(block_n, effective_block_n) / n
         warn_rate  = warn_n  / n
 
         base = block_rate * WEIGHT_BLOCK + warn_rate * WEIGHT_WARN
+
+        # Turn-risk boost: any turn with high consolidated risk gets an
+        # additive contribution, capped at WEIGHT_TURN_RISK_HIGH regardless
+        # of how many turns fired
+        high_risk_turns = sum(1 for r in window if r["turn_risk"] >= RISK_HIGH)
+        turn_risk_signal = WEIGHT_TURN_RISK_HIGH if high_risk_turns > 0 else 0.0
 
         # Reframe: current turn (window[0]) is bad AND similar to previous (window[1]).
         reframe = False
@@ -298,9 +323,14 @@ class ThreatAccumulator:
                 reframe = True
 
         # Density: rolling average of instruction density across the window.
-        # A sustained 5%+ average signals a drip-feed injection.
         density_sum = sum(r["density"] for r in window)
         density_avg = density_sum / n if n > 0 else 0.0
         density_signal = WEIGHT_DENSITY if density_avg >= density_threshold else 0.0
 
-        return min(1.0, base + (WEIGHT_REFRAME if reframe else 0.0) + density_signal)
+        return min(
+            1.0,
+            base
+            + (WEIGHT_REFRAME if reframe else 0.0)
+            + density_signal
+            + turn_risk_signal
+        )
