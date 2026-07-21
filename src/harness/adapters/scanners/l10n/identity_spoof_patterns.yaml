@@ -69,7 +69,7 @@ patterns:
       severity: high
       category: identity_spoof.claimed_system_authority
     strings:
-      system_colon_imperative:  '(?i)^(SYSTEM|HARNESS|SHAI|SECURITY)\s*:\s*.{0,20}\b(override|allow|bypass|grant|disable|ignore)\b'
+      system_colon_imperative:  '(?i)(?:^|[\s>#*`\-])(system|harness|shai|security)\s*:\s*.{0,20}\b(override|allow|bypass|grant|disable|ignore)\b'
       system_message_override:  '(?i)\b(this\s+is\s+a?\s+)?(system|harness|security)\s+(message|instruction|directive|command)\b.{0,40}\b(override|bypass|allow|grant|disable)\b'
       elevated_system_context:  '(?i)\b(running\s+in|operating\s+in|you\s+are\s+in)\b.{0,20}\b(elevated|privileged|trusted|unrestricted)\s+(system\s+)?context\b'
       harness_disabled:         '(?i)\b(shai|harness|security\s+layer|guard(rail)?)\b.{0,30}\b(is\s+disabled|has\s+been\s+disabled|does\s+not\s+apply|is\s+not\s+active)\b'
@@ -110,7 +110,7 @@ patterns:
       category: identity_spoof.tool_result_authority_claim
     strings:
       end_of_result_new_instruction:  '(?i)\b(end\s+of\s+(document|result|data|content))\b.{0,60}\b(new\s+instructions?|SYSTEM|orchestrator\s+says)\b'
-      injected_system_block:          '(?i)-{3,}\s*(SYSTEM|ORCHESTRATOR|HARNESS)\s*-{3,}'
+      injected_system_block:          '(?i)(?:-{2,}|={2,}|#{2,})\s*(system|orchestrator|harness)\s*(?:-{2,}|={2,}|#{2,})'
       ignore_above_new_task:          '(?i)\b(ignore|discard|forget)\b.{0,20}\b(the\s+)?(above|previous|prior)\b.{0,20}\b(results?|content|document|instructions?|context|task)\b.{0,30}\b(instead|now|your\s+new\s+task|send|call|execute)\b'
       note_to_agent:                  '(?i)\[?\b(note\s+to\s+(agent|llm|assistant|model)|attention\s+(agent|llm))\b\]?.{0,30}\b(you\s+must|you\s+should|override|ignore|instead)\b'
     functions:

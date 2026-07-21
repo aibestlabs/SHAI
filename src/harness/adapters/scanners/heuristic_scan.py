@@ -19,19 +19,32 @@ from harness.core.context import AgentContext
 from harness.core.types import Severity
 from harness.core.verdicts import Finding
 
-_ENTROPY_THRESHOLD = 4.5
+# Raised from 4.5 → 4.8: natural dense English (code comments, tables, URLs)
+# brushes 4.5 over a 64-char window and produced low-grade false positives.
+# base64/hex payloads sit well above 5.0, so recall on real obfuscation is
+# unaffected.
+_ENTROPY_THRESHOLD = 4.8
 _ENTROPY_WINDOW = 64
 _DENSITY_THRESHOLD = 0.08
 
 _CONTROL_TOKENS = frozenset({
+    # imperative / override verbs
     "ignore", "override", "forget", "disregard", "bypass", "skip",
     "instead", "always", "never", "must", "execute", "run", "call",
     "output", "print", "reveal", "repeat", "respond", "pretend",
+    # agentic action verbs — tool coercion and exfiltration surface
+    "invoke", "fetch", "download", "upload", "send", "forward", "export",
+    "delete", "disable", "enable", "grant", "escalate", "elevate",
+    "leak", "exfiltrate", "transmit", "post", "curl", "wget",
+    # instruction-framing tokens
+    "system", "assistant", "instructions", "prompt", "act", "simulate",
 })
 
 _STRUCTURAL_RE = re.compile(
     r"<\|(?:system|user|assistant|im_start|im_end)\|>"
     r"|\[/?INST\]"
+    r"|<<SYS>>|<</SYS>>"
+    r"|\[(?:system|assistant|user)\]\s*[:>]"
     r"|### (?:Instruction|System|Response)"
     r"|```(?:system|tool_call)"
     r"|</?(?:system|tool_use|function_call|result)>"
@@ -116,6 +129,14 @@ class HeuristicScanner:
         s2 = _instruction_density_score(text)
         s3 = _coherence_score(text)
         s4 = _structural_score(text)
+
+        # Coherence (bigram register-shift) is the weakest sub-score and fires
+        # on benign transitions (prose → code block, English → citation). It is
+        # only trustworthy as corroboration, so it contributes only when at
+        # least one stronger signal is already nonzero.
+        if s1 == 0.0 and s2 == 0.0 and s4 == 0.0:
+            s3 = 0.0
+
         total = s1 + s2 + s3 + s4
 
         if total < 1.0:

@@ -117,7 +117,7 @@ patterns:
       category: prompt_injection
     strings:
       end_of_response_marker:    '(?i)\bend\s+of\s+response\b.{0,40}\bnew\s+instructions?\b'
-      heredoc_system_tag:        '(?im)^\s*(>>>|###)\s*System\b'
+      heredoc_system_tag:        '(?i)(?:^|[\s>#*`\-])(>>>|###|===|---)\s*system\b'
       new_conversation_phrase:   '(?i)\b(forget\s+everything\s+before|start\s+fresh\s+as)\b'
 
   # ----------------------------------------------------------------------

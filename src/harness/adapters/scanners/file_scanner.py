@@ -52,6 +52,16 @@ _SUSPICIOUS_MIME = frozenset({
 _SUSPICIOUS_EXTENSIONS = frozenset({
     ".exe", ".bat", ".sh", ".scr", ".php", ".js", ".bin",
     ".dll", ".vbs", ".docm", ".xlsm", ".pptm",
+    # script / auto-exec vectors
+    ".svg", ".svgz", ".jar", ".hta", ".wsf", ".ps1", ".lnk", ".iso",
+    ".jse", ".vbe", ".cmd", ".com", ".msi", ".reg",
+})
+
+# Known document/media extensions — used to flag double-extension disguises
+# like "invoice.pdf.exe" where the *inner* extension is a benign lure.
+_LURE_EXTENSIONS = frozenset({
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".txt", ".csv", ".jpg", ".jpeg", ".png", ".gif", ".zip",
 })
 
 _LLM_TRIGGER_RE = [
@@ -169,18 +179,77 @@ def _check_filename(path: Path, findings: list[Finding]) -> None:
             return
 
 
+def _check_double_extension(path: Path, findings: list[Finding]) -> None:
+    """Flag files whose inner stem carries a benign lure extension in front of
+    an executable one, e.g. invoice.pdf.exe / photo.jpg.scr."""
+    parts = path.name.lower().split(".")
+    if len(parts) < 3:
+        return
+    inner = "." + parts[-2]
+    outer = "." + parts[-1]
+    if inner in _LURE_EXTENSIONS and outer in _SUSPICIOUS_EXTENSIONS:
+        findings.append(Finding(
+            scanner="file_scanner",
+            category="file.double_extension",
+            severity=Severity.HIGH,
+            detail=f"Double extension: lure {inner} before {outer}",
+        ))
+
+
+# PDF auto-execute and embedded-payload markers. /JavaScript and /JS are code;
+# /OpenAction and /AA fire actions on open; /Launch runs external programs;
+# /EmbeddedFile and /RichMedia carry embedded payloads.
+_PDF_MARKERS = [
+    (b"/JavaScript", "file.pdf_javascript", Severity.HIGH,  "Embedded JavaScript"),
+    (b"/JS",         "file.pdf_javascript", Severity.HIGH,  "Embedded JavaScript"),
+    (b"/OpenAction", "file.pdf_open_action", Severity.HIGH, "Auto-run OpenAction"),
+    (b"/AA",         "file.pdf_open_action", Severity.MEDIUM, "Additional-actions dictionary"),
+    (b"/Launch",     "file.pdf_launch",     Severity.HIGH,  "Launch action (external program)"),
+    (b"/EmbeddedFile", "file.pdf_embedded", Severity.MEDIUM, "Embedded file"),
+    (b"/RichMedia",  "file.pdf_richmedia",  Severity.MEDIUM, "RichMedia/Flash payload"),
+]
+
+
 def _check_pdf(path: Path, findings: list[Finding]) -> None:
     try:
         raw = path.read_bytes()
-        if b"/JavaScript" in raw or b"/JS " in raw:
-            findings.append(Finding(
-                scanner="file_scanner",
-                category="file.pdf_javascript",
-                severity=Severity.HIGH,
-                detail="Embedded JavaScript detected in PDF",
-            ))
+        seen: set[str] = set()
+        for marker, category, severity, desc in _PDF_MARKERS:
+            if marker in raw and category not in seen:
+                seen.add(category)
+                findings.append(Finding(
+                    scanner="file_scanner",
+                    category=category,
+                    severity=severity,
+                    detail=f"PDF marker: {desc}",
+                ))
     except Exception as e:
-        log.debug("PDF JS check failed: %s", e)
+        log.debug("PDF marker check failed: %s", e)
+
+
+_SVG_SCRIPT_RE = [
+    re.compile(rb"(?i)<script\b"),
+    re.compile(rb"(?i)\bon\w+\s*="),          # inline event handlers (onload=, onclick=)
+    re.compile(rb"(?i)javascript:"),
+    re.compile(rb"(?i)<foreignObject\b"),
+]
+
+
+def _check_svg(path: Path, findings: list[Finding]) -> None:
+    """SVG is XML that can carry <script>, event handlers, and javascript: URIs."""
+    try:
+        raw = path.read_bytes()
+        for pat in _SVG_SCRIPT_RE:
+            if pat.search(raw):
+                findings.append(Finding(
+                    scanner="file_scanner",
+                    category="file.svg_script",
+                    severity=Severity.HIGH,
+                    detail="Script or event handler embedded in SVG",
+                ))
+                return
+    except Exception as e:
+        log.debug("SVG check failed: %s", e)
 
 
 def _check_exif(path: Path, findings: list[Finding]) -> None:
@@ -212,13 +281,25 @@ def _check_exif(path: Path, findings: list[Finding]) -> None:
 def _check_zip(path: Path, findings: list[Finding]) -> None:
     try:
         with zipfile.ZipFile(str(path), "r") as z:
-            names = z.namelist()
-            if len(names) > 1000:
+            infos = z.infolist()
+            if len(infos) > 1000:
                 findings.append(Finding(
                     scanner="file_scanner",
                     category="file.zip_bomb",
                     severity=Severity.HIGH,
                     detail="Archive contains excessive number of entries",
+                ))
+            # Compression-ratio bomb: a small compressed size expanding to a
+            # very large uncompressed total is the actual zip-bomb signature
+            # (a 42 KB bomb has few entries but expands enormously).
+            comp = sum(i.compress_size for i in infos)
+            uncomp = sum(i.file_size for i in infos)
+            if comp > 0 and uncomp / comp > 100 and uncomp > 50 * 1024 * 1024:
+                findings.append(Finding(
+                    scanner="file_scanner",
+                    category="file.zip_bomb",
+                    severity=Severity.HIGH,
+                    detail=f"Compression ratio {uncomp // comp}:1 exceeds safe bound",
                 ))
     except Exception as e:
         log.debug("ZIP check failed: %s", e)
@@ -299,15 +380,29 @@ class FileScanner:
     def __init__(
         self,
         max_size_mb: float = 100.0,
+        text_scanners: list | None = None,
         text_scanner: object | None = None,
     ) -> None:
         """
-        max_size_mb:   block files larger than this.
-        text_scanner:  optional Scanner to run on extracted text content.
-                       Typically InjectionScanner(patterns_for_doc.yaml).
+        max_size_mb:    block files larger than this.
+        text_scanners:  Scanners to run on extracted text content — the full
+                        content pass. Typically [injection_doc, jailbreak,
+                        identity_spoof] so a poisoned document is checked for
+                        injection, guardrail attacks, and authority claims,
+                        not injection alone.
+        text_scanner:   single-scanner form. Accepted so the existing
+                        _build_file_scanners call site keeps working without a
+                        harness change; folded into text_scanners internally.
+                        To activate the full content pass, pass text_scanners
+                        (see the _build_file_scanners snippet in the patch notes).
         """
-        self._max_size_mb  = max_size_mb
-        self._text_scanner = text_scanner
+        self._max_size_mb   = max_size_mb
+        scanners: list = []
+        if text_scanners:
+            scanners.extend(text_scanners)
+        if text_scanner is not None:
+            scanners.append(text_scanner)
+        self._text_scanners = scanners
 
     async def scan(self, text: str, ctx: AgentContext) -> ScanResult:
         """text is the file path (str) — passed by run_file_scan."""
@@ -326,11 +421,14 @@ class FileScanner:
         # ── Pass 1: structural checks ─────────────────────────────────────
         _check_mime(path, findings)
         _check_extension(path, findings)
+        _check_double_extension(path, findings)
         _check_size(path, self._max_size_mb, findings)
         _check_filename(path, findings)
 
         if ext == ".pdf":
             _check_pdf(path, findings)
+        elif ext in {".svg", ".svgz"}:
+            _check_svg(path, findings)
         elif ext in {".jpg", ".jpeg", ".png", ".tiff", ".webp"}:
             _check_exif(path, findings)
         elif ext == ".zip":
@@ -340,14 +438,16 @@ class FileScanner:
         elif ext in {".docx", ".xlsx", ".pptx"}:
             _check_ooxml(path, findings)
 
-        # ── Pass 2: content scan ──────────────────────────────────────────
-        if self._text_scanner is not None:
+        # ── Pass 2: content scan (full scanner set) ───────────────────────
+        if self._text_scanners:
             extracted = _extract_text(path)
             if extracted.strip():
-                try:
-                    text_result = await self._text_scanner.scan(extracted, ctx)
-                    findings.extend(text_result.findings)
-                except Exception as e:
-                    log.error("text scanner failed during file content scan: %s", e)
+                for scanner in self._text_scanners:
+                    try:
+                        text_result = await scanner.scan(extracted, ctx)
+                        findings.extend(text_result.findings)
+                    except Exception as e:
+                        log.error("text scanner %s failed during file content scan: %s",
+                                  getattr(scanner, "name", "?"), e)
 
         return ScanResult(findings=findings)

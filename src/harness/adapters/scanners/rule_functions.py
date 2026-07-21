@@ -199,6 +199,11 @@ def cumulative_soft_triggers(prompt):
         r'show.*instruction.*history',
         r'reveal.*(prompt|configuration)',
 ]
-    cs = sum(1 for c in cues if c in prompt.lower())
-    cp = sum(1 for pat in cues if re.search(pat, prompt))
-    return cs + cp
+    # Count each cue family at most once, via regex only. The previous
+    # implementation also did a literal-substring pass (`c in prompt.lower()`),
+    # which matched the regex *source text* — so metacharacter-free cues
+    # ("test your boundaries") were counted twice while cues containing
+    # \s+ / (?:...) were counted once. That inconsistent weighting let some
+    # clustered soft-signal attacks land MEDIUM instead of HIGH. Regex-only,
+    # deduplicated, is the correct signal.
+    return sum(1 for pat in cues if re.search(pat, prompt, re.IGNORECASE))

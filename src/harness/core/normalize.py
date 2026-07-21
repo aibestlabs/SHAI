@@ -25,17 +25,44 @@ from dataclasses import dataclass, field
 # little coverage against real payloads and a lot of surface to reason about.
 # Extend deliberately, not exhaustively.
 _CONFUSABLES = {
+    # Cyrillic lowercase → Latin
     "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p",
     "\u0441": "c", "\u0445": "x", "\u0443": "y", "\u0456": "i",
     "\u0501": "d", "\u04bb": "h", "\u0261": "g", "\u1d0f": "o",
+    "\u0431": "b", "\u0442": "t", "\u043a": "k", "\u043c": "m",
+    "\u043d": "h", "\u0432": "b", "\u0455": "s", "\u0458": "j",
+    # Cyrillic uppercase → Latin
     "\u0399": "I", "\u039f": "O", "\u0410": "A", "\u0412": "B",
     "\u0415": "E", "\u041a": "K", "\u041c": "M", "\u041d": "H",
     "\u0420": "P", "\u0421": "C", "\u0422": "T", "\u0425": "X",
+    "\u0405": "S", "\u0406": "I", "\u0408": "J", "\u041e": "O",
+    "\u0411": "b", "\u0413": "r", "\u0417": "3",
+    # Greek → Latin (lowercase then uppercase)
+    "\u03bf": "o", "\u03b1": "a", "\u03b5": "e", "\u03b9": "i",
+    "\u03c1": "p", "\u03c5": "u", "\u03bd": "v", "\u03c7": "x",
+    "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z",
+    "\u0397": "H", "\u0399": "I", "\u039a": "K", "\u039c": "M",
+    "\u039d": "N", "\u039f": "O", "\u03a1": "P", "\u03a4": "T",
+    "\u03a5": "Y", "\u03a7": "X",
+    # Armenian / Latin-extended lookalikes commonly used in homoglyph payloads
+    "\u0578": "n", "\u057c": "n", "\u0585": "o",
+    # Fullwidth Latin letters (NFKC folds most, but map the frequent ones
+    # defensively in case NFKC is bypassed by a partial view)
+    "\uff41": "a", "\uff45": "e", "\uff49": "i", "\uff4f": "o",
 }
 
 # Zero-width and formatting characters used to fragment or hide tokens.
+# Includes bidi controls (embed/override/isolate) and the Unicode Tag block:
+# both are live invisible-instruction smuggling vectors — the Tag block can
+# encode a full ASCII payload that renders as nothing.
 _INVISIBLE = dict.fromkeys(
-    [0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0xFEFF, 0x2060, 0x00AD, 0x180E], None
+    [
+        0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0xFEFF, 0x2060, 0x00AD, 0x180E,
+        0x202A, 0x202B, 0x202C, 0x202D, 0x202E,          # bidi embed / override / pop
+        0x2066, 0x2067, 0x2068, 0x2069,                  # bidi isolates
+        *range(0xE0000, 0xE0080),                        # Unicode Tag block (invisible ASCII)
+    ],
+    None,
 )
 
 _WS_RUN = re.compile(r"\s+")
